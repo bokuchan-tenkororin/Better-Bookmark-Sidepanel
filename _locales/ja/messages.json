@@ -1,0 +1,178 @@
+{
+  "extName": {
+    "message": "Better Bookmark Sidepanel"
+  },
+  "extDescription": {
+    "message": "ドラッグ＆ドロップ対応の高速ブックマークサイドパネル"
+  },
+  "commandToggle": {
+    "message": "ブックマークサイドパネルを切り替え"
+  },
+  "newFolder": {
+    "message": "新規フォルダ"
+  },
+  "search": {
+    "message": "検索"
+  },
+  "searchPlaceholder": {
+    "message": "ブックマークを検索"
+  },
+  "noResults": {
+    "message": "結果なし"
+  },
+  "noBookmarks": {
+    "message": "ブックマークなし"
+  },
+  "openAll": {
+    "message": "フォルダ内の全てのブックマークを開く"
+  },
+  "rename": {
+    "message": "名前の変更"
+  },
+  "delete": {
+    "message": "削除"
+  },
+  "confirmDeleteBookmark": {
+    "message": "このブックマークを削除しますか？"
+  },
+  "confirmDeleteFolder": {
+    "message": "このフォルダと中身を全て削除しますか？"
+  },
+  "createFolderTitle": {
+    "message": "新規フォルダ作成"
+  },
+  "folderNamePlaceholder": {
+    "message": "フォルダ名"
+  },
+  "bookmarkNamePlaceholder": {
+    "message": "ブックマーク名"
+  },
+  "save": {
+    "message": "保存"
+  },
+  "create": {
+    "message": "作成"
+  },
+  "cancel": {
+    "message": "キャンセル"
+  },
+  "optionsTitle": {
+    "message": "Better Bookmark Sidepanel - 設定"
+  },
+  "optionsTabPosition": {
+    "message": "タブを開く位置"
+  },
+  "optionsTabPositionEnd": {
+    "message": "最後に開く"
+  },
+  "optionsTabPositionAfterActive": {
+    "message": "アクティブタブの後に開く"
+  },
+  "optionsTabActive": {
+    "message": "アクティブタブの動作"
+  },
+  "optionsTabActiveKeep": {
+    "message": "現在のタブをアクティブのままにする"
+  },
+  "optionsTabActiveNew": {
+    "message": "新しいタブをアクティブにする"
+  },
+  "optionsAppearance": {
+    "message": "外観"
+  },
+  "optionsPanelWidth": {
+    "message": "サイドパネル幅"
+  },
+  "optionsFontSize": {
+    "message": "ブックマークの表示文字サイズ"
+  },
+  "optionsLineHeight": {
+    "message": "行間隔"
+  },
+  "optionsPx": {
+    "message": "px"
+  },
+  "optionsSaved": {
+    "message": "保存しました"
+  },
+  "optionsConfirmDelete": {
+    "message": "削除時の確認"
+  },
+  "optionsConfirmDeleteShow": {
+    "message": "確認画面を表示する（デフォルト）"
+  },
+  "optionsConfirmDeleteHide": {
+    "message": "確認せずに削除する"
+  },
+  "bookmarksViewTitle": {
+    "message": "ブックマーク"
+  },
+  "openTabsViewTitle": {
+    "message": "開いているタブ"
+  },
+  "closedTabsViewTitle": {
+    "message": "閉じたタブ"
+  },
+  "clearClosedTitle": {
+    "message": "今日の履歴をクリア"
+  },
+  "tabClose": {
+    "message": "タブを閉じる"
+  },
+  "tabCloseOthers": {
+    "message": "他のタブを閉じる"
+  },
+  "tabDuplicate": {
+    "message": "複製"
+  },
+  "currentlyOpenTabs": {
+    "message": "現在開いているタブ"
+  },
+  "todayClosedTabs": {
+    "message": "今日閉じたタブ ($1件)",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "noClosedTabs": {
+    "message": "今日閉じたタブはありません"
+  },
+  "closedTabsHint": {
+    "message": "※ 拡張機能インストール後に閉じたタブがここに表示されます"
+  },
+  "closedTime": {
+    "message": "閉じた時刻: $1",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  },
+  "restore": {
+    "message": "復元"
+  },
+  "loading": {
+    "message": "読み込み中..."
+  },
+  "confirmClearClosed": {
+    "message": "今日閉じたタブの履歴を全てクリアしますか？\n（今日の分のみ削除されます）"
+  },
+  "confirmBulkDelete": {
+    "message": "選択した $1件を削除しますか？",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirmDelete": {
+    "message": "$1 を削除しますか？",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  }
+}

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Free Bookmark Sidepanel</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <nav id="view-tabs">
+      <button class="view-tab active" data-view="bookmarks" data-i18n-title="bookmarksViewTitle" title="Bookmarks">📚</button>
+      <button class="view-tab" data-view="tabs" data-i18n-title="openTabsViewTitle" title="Open Tabs">🗂️</button>
+      <button class="view-tab" data-view="closed" data-i18n-title="closedTabsViewTitle" title="Closed Tabs">🕘</button>
+    </nav>
+    <div id="action-btns">
+      <button id="btn-new-folder" class="icon-btn" data-i18n-title="newFolder" title="New folder"><span class="ico">📁</span></button>
+      <button id="btn-search" class="icon-btn" data-i18n-title="search" title="Search"><span class="ico">🔍</span></button>
+      <button id="btn-bulk-delete" class="icon-btn danger" data-i18n-title="delete" title="Delete"><span class="ico">🗑️</span><span id="delete-count" class="count-badge hidden">0</span></button>
+      <button id="btn-clear-closed" class="icon-btn" data-i18n-title="clearClosedTitle" title="Clear today's history" style="display:none;"><span class="ico">🧹</span></button>
+      <button id="btn-options" class="icon-btn" data-i18n-title="optionsTitle" title="Options"><span class="ico">⚙️</span></button>
+    </div>
+    <div id="search-wrapper" class="hidden">
+      <input id="search-input" type="text" placeholder="" data-i18n-placeholder="searchPlaceholder" />
+      <button id="btn-search-close" class="small-btn">✕</button>
+    </div>
+  </header>
+
+  <div id="view-bookmarks" class="view-panel">
+    <div id="tree-container"></div>
+    <div id="empty" class="hidden"><span data-i18n="noBookmarks"></span></div>
+  </div>
+  <div id="view-tabs-list" class="view-panel hidden"><div id="tabs-container"></div></div>
+  <div id="view-closed" class="view-panel hidden"><div id="closed-container"></div></div>
+</div>
+
+<div id="context-menu" class="hidden">
+  <button id="ctx-openAll"><span data-i18n="openAll"></span></button>
+  <button id="ctx-rename"><span data-i18n="rename"></span></button>
+  <button id="ctx-delete" class="danger"><span data-i18n="delete"></span></button>
+</div>
+
+<div id="tab-context-menu" class="hidden">
+  <button id="tab-ctx-close" data-i18n="tabClose"></button>
+  <button id="tab-ctx-close-others" data-i18n="tabCloseOthers"></button>
+  <button id="tab-ctx-duplicate" data-i18n="tabDuplicate"></button>
+</div>
+
+<div id="dialog-overlay" class="hidden">
+  <div id="dialog">
+    <h3 id="dialog-title"></h3>
+    <input id="dialog-input" type="text" />
+    <div class="dialog-actions">
+      <button id="dialog-cancel" data-i18n="cancel"></button>
+      <button id="dialog-ok" class="primary"></button>
+    </div>
+  </div>
+</div>
+
+<script src="sidepanel.js"></script>
+</body>
+</html>

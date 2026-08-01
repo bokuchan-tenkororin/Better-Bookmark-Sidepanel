@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Options</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<div class="container">
+  <h1 data-i18n="optionsTitle">Better Bookmark Sidepanel - Options</h1>
+  <section>
+    <h2 data-i18n="optionsTabPosition">Tab opening position</h2>
+    <label class="radio"><input type="radio" name="tabOpenPosition" value="end"><span data-i18n="optionsTabPositionEnd"></span></label>
+    <label class="radio"><input type="radio" name="tabOpenPosition" value="afterActive"><span data-i18n="optionsTabPositionAfterActive"></span></label>
+  </section>
+  <section>
+    <h2 data-i18n="optionsTabActive">Active tab behavior</h2>
+    <label class="radio"><input type="radio" name="tabActiveBehavior" value="keep"><span data-i18n="optionsTabActiveKeep"></span></label>
+    <label class="radio"><input type="radio" name="tabActiveBehavior" value="activate"><span data-i18n="optionsTabActiveNew"></span></label>
+  </section>
+  <section>
+    <h2 data-i18n="optionsConfirmDelete">When deleting</h2>
+    <label class="radio"><input type="radio" name="confirmDelete" value="show"><span data-i18n="optionsConfirmDeleteShow"></span></label>
+    <label class="radio"><input type="radio" name="confirmDelete" value="hide"><span data-i18n="optionsConfirmDeleteHide"></span></label>
+  </section>
+  <section>
+    <h2 data-i18n="optionsAppearance">Appearance</h2>
+    <div class="field">
+      <label data-i18n="optionsFontSize">Font size</label>
+      <div class="input-group">
+        <input type="range" id="fontSize" min="10" max="20" step="1">
+        <input type="number" id="fontSizeNum" min="10" max="20" step="1">
+        <span data-i18n="optionsPx">px</span>
+      </div>
+    </div>
+    <div class="field">
+      <label data-i18n="optionsLineHeight">Line spacing</label>
+      <div class="input-group">
+        <input type="range" id="lineHeight" min="0.7" max="2.5" step="0.1">
+        <input type="number" id="lineHeightNum" min="0.7" max="2.5" step="0.1">
+      </div>
+    </div>
+  </section>
+  <div id="toast" class="hidden"></div>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

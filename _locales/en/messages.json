@@ -1,0 +1,179 @@
+{
+  "extName": {
+    "message": "Better Bookmark Sidepanel"
+  },
+  "extDescription": {
+    "message": "Fast bookmark sidepanel with drag & drop"
+  },
+  "commandToggle": {
+    "message": "Toggle bookmark sidepanel"
+  },
+  "newFolder": {
+    "message": "New folder"
+  },
+  "search": {
+    "message": "Search"
+  },
+  "searchPlaceholder": {
+    "message": "Search bookmarks"
+  },
+  "noResults": {
+    "message": "No results"
+  },
+  "noBookmarks": {
+    "message": "No bookmarks"
+  },
+  "openAll": {
+    "message": "Open all bookmarks in folder"
+  },
+  "rename": {
+    "message": "Rename"
+  },
+  "delete": {
+    "message": "Delete"
+  },
+  "confirmDeleteBookmark": {
+    "message": "Delete this bookmark?"
+  },
+  "confirmDeleteFolder": {
+    "message": "Delete this folder and all its contents?"
+  },
+  "createFolderTitle": {
+    "message": "Create new folder"
+  },
+  "folderNamePlaceholder": {
+    "message": "Folder name"
+  },
+  "bookmarkNamePlaceholder": {
+    "message": "Bookmark name"
+  },
+  "save": {
+    "message": "Save"
+  },
+  "create": {
+    "message": "Create"
+  },
+  "cancel": {
+    "message": "Cancel"
+  },
+  "optionsTitle": {
+    "message": "Better Bookmark Sidepanel - Options"
+  },
+  "optionsTabPosition": {
+    "message": "Tab opening position"
+  },
+  "optionsTabPositionEnd": {
+    "message": "Open at end"
+  },
+  "optionsTabPositionAfterActive": {
+    "message": "Open after active tab"
+  },
+  "optionsTabActive": {
+    "message": "Active tab behavior"
+  },
+  "optionsTabActiveKeep": {
+    "message": "Keep current tab active"
+  },
+  "optionsTabActiveNew": {
+    "message": "Activate new tab"
+  },
+  "optionsAppearance": {
+    "message": "Appearance"
+  },
+  "optionsPanelWidth": {
+    "message": "Side panel width"
+  },
+  "optionsFontSize": {
+    "message": "Font size"
+  },
+  "optionsLineHeight": {
+    "message": "Line spacing"
+  },
+  "optionsPx": {
+    "message": "px"
+  },
+  "optionsSaved": {
+    "message": "Saved"
+  },
+  "optionsConfirmDelete": {
+    "message": "When deleting"
+  },
+  "optionsConfirmDeleteShow": {
+    "message": "Show confirmation dialog (default)"
+  },
+  "optionsConfirmDeleteHide": {
+    "message": "Delete without confirmation"
+  },
+  "bookmarksViewTitle": {
+    "message": "Bookmarks"
+  },
+  "openTabsViewTitle": {
+    "message": "Open tabs"
+  },
+  "closedTabsViewTitle": {
+    "message": "Closed tabs"
+  },
+  "clearClosedTitle": {
+    "message": "Clear today's history"
+  },
+  "tabClose": {
+    "message": "Close tab"
+  },
+  "tabCloseOthers": {
+    "message": "Close other tabs"
+  },
+  "tabDuplicate": {
+    "message": "Duplicate"
+  },
+  "currentlyOpenTabs": {
+    "message": "Currently Open Tabs"
+  },
+  "todayClosedTabs": {
+    "message": "Today Closed Tabs ($1)",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "noClosedTabs": {
+    "message": "No closed tabs today"
+  },
+  "closedTabsHint": {
+    "message": "Tabs closed after installing this extension will appear here"
+  },
+  "closedTime": {
+    "message": "Closed: $1",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  },
+  "restore": {
+    "message": "Restore"
+  },
+  "loading": {
+    "message": "Loading..."
+  },
+  "confirmClearClosed": {
+    "message": "Clear all of today's closed tab history?\n(Only today's will be deleted)"
+  },
+  "confirmBulkDelete": {
+    "message": "Delete $1 selected item(s)?",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirmDelete": {
+    "message": "Delete \"$1\"?",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  }
+}
