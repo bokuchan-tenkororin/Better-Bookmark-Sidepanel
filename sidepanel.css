@@ -1,5 +1,4 @@
 :root {
-  --panel-width: 360px;
   --font-size: 14px;
   --line-height: 1;
   --bg: #ffffff;
@@ -12,7 +11,6 @@
 }
 * { box-sizing: border-box; }
 html, body { margin:0; padding:0; height:100%; width:100%; }
-/* 自作拡張をライト化拡張の影響から保護 */
 html {
   filter: none !important;
   -webkit-filter: none !important;
@@ -89,8 +87,6 @@ body {
 .node-row .node-checkbox { margin-left:auto; flex-shrink:0; width:14px; height:14px; cursor:pointer; }
 .children { padding-left:14px; width:100%; box-sizing:border-box; }
 .children.collapsed { display:none; }
-
-/* タブと閉じたタブも行間に連動 */
 .tab-row, .closed-row {
   display:flex; align-items:center; gap:6px;
   padding: calc(1px * var(--line-height)) 8px;
@@ -111,19 +107,17 @@ body {
 .tab-row .tab-close { width:18px; height:18px; border:none; background:transparent; border-radius:50%; cursor:pointer; flex-shrink:0; }
 .tab-row .tab-close:hover { background:#e8eaed; }
 .closed-row .restore-btn { font-size:11px; padding:2px 6px; border:1px solid var(--border); border-radius:4px; background:white; cursor:pointer; flex-shrink:0; }
-
-#context-menu, #tab-context-menu {
+#context-menu {
   position:fixed; background:white !important; border:1px solid var(--border); border-radius:8px;
   box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:1000; min-width:160px; padding:4px; display:flex; flex-direction:column;
   filter: none !important;
 }
-#context-menu.hidden, #tab-context-menu.hidden { display:none; }
-#context-menu button, #tab-context-menu button {
+#context-menu.hidden { display:none; }
+#context-menu button {
   text-align:left; border:none; background:transparent; padding:6px 10px; border-radius:4px; cursor:pointer; font-size:12px;
 }
-#context-menu button:hover, #tab-context-menu button:hover { background: var(--bg-hover); }
+#context-menu button:hover { background: var(--bg-hover); }
 #context-menu button.danger { color:#d93025; }
-
 #dialog-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.3) !important; display:flex; align-items:center; justify-content:center; z-index:2000; filter: none !important; -webkit-filter: none !important; }
 #dialog-overlay.hidden { display:none; }
 #dialog { background:white !important; border-radius:10px; padding:16px; width:90%; max-width:300px; box-shadow:0 8px 24px rgba(0,0,0,0.2); filter: none !important; -webkit-filter: none !important; color: #202124 !important; }
@@ -132,12 +126,9 @@ body {
 .dialog-actions { display:flex; justify-content:flex-end; gap:6px; margin-top:12px; }
 .dialog-actions button { padding:5px 12px; border-radius:5px; border:1px solid var(--border); background:white !important; cursor:pointer; font-size:12px; color: #202124 !important; filter: none !important; }
 .dialog-actions button.primary { background: var(--accent) !important; color:white !important; border-color:var(--accent) !important; }
-
 #empty { padding:20px; text-align:center; color:var(--text-secondary); font-size:12px; }
 #empty.hidden { display:none; }
 .section-title { font-size:10px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; padding:8px 10px 3px; letter-spacing:0.5px; }
-
-/* ライト化拡張からの保護 - 強制的にライトテーマを維持 */
 html.__toggle_color_theme_active,
 html.__toggle_color_theme_active body,
 html.__toggle_color_theme_active #app,

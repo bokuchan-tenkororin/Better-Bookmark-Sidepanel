@@ -175,5 +175,14 @@
         "content": "$1"
       }
     }
+  },
+  "confirmOpenMany": {
+    "message": "Open $1 bookmarks at once? This may affect performance.",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "12"
+      }
+    }
   }
 }

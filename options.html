@@ -8,21 +8,25 @@
 <body>
 <div class="container">
   <h1 data-i18n="optionsTitle">Better Bookmark Sidepanel - Options</h1>
+  
   <section>
     <h2 data-i18n="optionsTabPosition">Tab opening position</h2>
     <label class="radio"><input type="radio" name="tabOpenPosition" value="end"><span data-i18n="optionsTabPositionEnd"></span></label>
     <label class="radio"><input type="radio" name="tabOpenPosition" value="afterActive"><span data-i18n="optionsTabPositionAfterActive"></span></label>
   </section>
+  
   <section>
     <h2 data-i18n="optionsTabActive">Active tab behavior</h2>
     <label class="radio"><input type="radio" name="tabActiveBehavior" value="keep"><span data-i18n="optionsTabActiveKeep"></span></label>
     <label class="radio"><input type="radio" name="tabActiveBehavior" value="activate"><span data-i18n="optionsTabActiveNew"></span></label>
   </section>
+  
   <section>
     <h2 data-i18n="optionsConfirmDelete">When deleting</h2>
     <label class="radio"><input type="radio" name="confirmDelete" value="show"><span data-i18n="optionsConfirmDeleteShow"></span></label>
     <label class="radio"><input type="radio" name="confirmDelete" value="hide"><span data-i18n="optionsConfirmDeleteHide"></span></label>
   </section>
+  
   <section>
     <h2 data-i18n="optionsAppearance">Appearance</h2>
     <div class="field">
@@ -41,6 +45,16 @@
       </div>
     </div>
   </section>
+
+  <section>
+    <h2 data-i18n="optionsBackup">Backup & Restore</h2>
+    <div class="field">
+      <label for="backupFolderSelect" data-i18n="optionsBackupFolder"></label>
+      <select id="backupFolderSelect"></select>
+      <p class="desc" data-i18n="optionsBackupHint"></p>
+    </div>
+  </section>
+
   <div id="toast" class="hidden"></div>
 </div>
 <script src="options.js"></script>

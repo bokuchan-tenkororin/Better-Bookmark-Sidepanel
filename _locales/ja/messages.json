@@ -174,5 +174,14 @@
         "content": "$1"
       }
     }
+  },
+  "confirmOpenMany": {
+    "message": "$1件のブックマークを一括で開きますか？\n動作が重くなる可能性があります。",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "12"
+      }
+    }
   }
 }

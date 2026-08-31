@@ -1,20 +1,47 @@
+* { box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", sans-serif;
   background:#f8f9fa;
   color:#202124;
   margin:0;
   padding:24px;
+  min-width:0;
 }
-.container { max-width:640px; margin:0 auto; background:white; padding:24px 32px; border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
-h1 { font-size:20px; margin:0 0 24px; }
+.container { 
+  max-width:640px; 
+  margin:0 auto; 
+  background:white; 
+  padding:24px 32px; 
+  border-radius:12px; 
+  box-shadow:0 1px 3px rgba(0,0,0,0.1);
+  min-width:0;
+  overflow:hidden;
+}
+h1 { font-size:20px; margin:0 0 24px; word-break:break-word; }
 h2 { font-size:15px; margin:24px 0 12px; color:#333; border-bottom:1px solid #eee; padding-bottom:6px; }
+section { min-width:0; overflow:hidden; }
 .radio { display:flex; align-items:center; gap:8px; padding:8px 0; cursor:pointer; }
 .radio input { accent-color:#1a73e8; }
-.field { margin:16px 0; }
-.field label { display:block; font-size:13px; margin-bottom:6px; color:#5f6368; }
-.input-group { display:flex; align-items:center; gap:8px; }
-.input-group input[type="range"] { flex:1; }
-.input-group input[type="number"] { width:80px; padding:6px; border:1px solid #dadce0; border-radius:6px; }
+.field { margin:16px 0; min-width:0; overflow:hidden; }
+.field label { display:block; font-size:13px; margin-bottom:6px; color:#5f6368; word-break:break-word; }
+.input-group { display:flex; align-items:center; gap:8px; min-width:0; max-width:100%; }
+.input-group input[type="range"] { flex:1; min-width:0; }
+.input-group input[type="number"] { width:80px; flex-shrink:0; padding:6px; border:1px solid #dadce0; border-radius:6px; }
+#backupFolderSelect {
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  padding:8px 10px;
+  border:1px solid #dadce0;
+  border-radius:6px;
+  background:white;
+  font-size:13px;
+  text-overflow:ellipsis;
+  overflow:hidden;
+  white-space:nowrap;
+  display:block;
+}
+.desc { font-size:12px; color:#5f6368; margin:6px 0 0; word-break:break-word; line-height:1.4; }
 #toast {
   position:fixed;
   bottom:24px;
@@ -25,6 +52,9 @@ h2 { font-size:15px; margin:24px 0 12px; color:#333; border-bottom:1px solid #ee
   padding:10px 20px;
   border-radius:24px;
   font-size:13px;
-  transition: opacity 0.3s;
+  transition:opacity 0.3s;
+  max-width:90vw;
+  text-align:center;
+  word-break:break-word;
 }
 #toast.hidden { opacity:0; pointer-events:none; }
