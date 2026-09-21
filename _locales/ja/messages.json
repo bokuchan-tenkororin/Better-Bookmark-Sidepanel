@@ -183,5 +183,46 @@
         "example": "12"
       }
     }
+  },
+  "deletedBookmarksViewTitle": {
+    "message": "削除したブックマーク"
+  },
+  "todayDeletedBookmarks": {
+    "message": "今日削除したブックマーク ($1件)",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "noDeletedBookmarks": {
+    "message": "削除したブックマークはありません"
+  },
+  "deletedBookmarksHint": {
+    "message": "※ 拡張機能インストール後に削除したブックマークがここに表示されます"
+  },
+  "deletedTime": {
+    "message": "削除時刻: $1",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  },
+  "clearDeletedTitle": {
+    "message": "削除履歴をクリア"
+  },
+  "confirmClearDeleted": {
+    "message": "削除したブックマークの履歴を全てクリアしますか？"
+  },
+  "restoreFailed": {
+    "message": "元のフォルダが見つからないため、その他のブックマークに復元しました。"
+  },
+  "deletedBadgeFolder": {
+    "message": "フォルダ"
+  },
+  "deletedBadgeBookmark": {
+    "message": "ブックマーク"
   }
 }

@@ -10,6 +10,8 @@ const OPTION_KEYS = ['tabOpenPosition','tabActiveBehavior','confirmDelete','font
 const UI_KEYS = ['expandedFolders','lastSelectedFolderId'];
 const META_KEY = 'configBackupFolderId';
 const BOOKMARK_CACHE_KEY = 'bookmarkTreeCacheV2';
+const DELETED_BOOKMARKS_KEY = 'deletedBookmarksHistory';
+const DELETED_MAX = 500;
 
 function encode(obj){ try{ return btoa(encodeURIComponent(JSON.stringify(obj))); }catch{ return null; } }
 function decode(h){ try{ return JSON.parse(decodeURIComponent(atob(h))); }catch{ return null; } }
@@ -160,6 +162,43 @@ try{
   if (chrome.bookmarks.onChildrenReordered) chrome.bookmarks.onChildrenReordered.addListener(scheduleBookmarkCache);
 }catch{}
 
+// ---- 削除したブックマークの履歴保存 ----
+chrome.bookmarks.onRemoved.addListener((id, removeInfo) => {
+  enqueue(async () => {
+    try {
+      const node = removeInfo && removeInfo.node ? removeInfo.node : null;
+      if (!node) return;
+      // 設定用ブックマークは除外
+      if (node.title === CONFIG_TITLE && node.url && node.url.startsWith(CONFIG_PREFIX)) return;
+      // ルートIDは除外
+      if (['0','1','2','3'].includes(String(id))) return;
+      // 内部用: 空タイトルかつconfig prefix含むものも除外（二重チェック）
+      if (node.title === CONFIG_TITLE) return;
+
+      const entry = {
+        id: String(id),
+        parentId: String(removeInfo.parentId || ''),
+        index: removeInfo.index || 0,
+        node: node, // title, url, children を含む完全なノード
+        deletedAt: Date.now()
+      };
+      const { [DELETED_BOOKMARKS_KEY]: history = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+      // 同じidが連続で入る重複を軽く防ぐ（1秒以内はスキップ）
+      if (history.length > 0) {
+        const last = history[0];
+        if (last.id === entry.id && last.node && last.node.title === entry.node.title && (Date.now() - last.deletedAt) < 1000) {
+          return;
+        }
+      }
+      history.unshift(entry);
+      if (history.length > DELETED_MAX) history.length = DELETED_MAX;
+      await chrome.storage.local.set({ [DELETED_BOOKMARKS_KEY]: history });
+    } catch (e) {
+      console.warn('Failed to save deleted bookmark', e);
+    }
+  });
+});
+
 function initCache(){
   const p=(async()=>{ try{ const tabs=await chrome.tabs.query({}); for(const t of tabs) if(t.id!=null) tabCache[t.id]={url:t.url||t.pendingUrl||'', title:t.title||'', favIconUrl:t.favIconUrl||''}; }catch{} })();
   cacheReadyPromise=p;
@@ -230,6 +269,22 @@ chrome.runtime.onMessage.addListener((msg,_,sendResponse)=>{
       const rem=closedTabsHistory.filter(t=>t.closedAt<start);
       await chrome.storage.local.set({closedTabsHistory:rem, lastClearedAt:Date.now()});
       sendResponse({ok:true});
+    }); return true;
+  }
+  if(msg.type==='CLEAR_DELETED_BOOKMARKS'){
+    enqueue(async()=>{
+      await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []});
+      sendResponse({ok:true});
+    }); return true;
+  }
+  if(msg.type==='DELETE_DELETED_ENTRY'){
+    enqueue(async()=>{
+      try{
+        const { [DELETED_BOOKMARKS_KEY]: history = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+        const filtered = history.filter(h => !(h.deletedAt === msg.deletedAt && h.id === msg.entryId));
+        await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: filtered});
+        sendResponse({ok:true});
+      }catch(e){ sendResponse({ok:false}); }
     }); return true;
   }
   if(msg.type==='SAVE_BACKUP'){ saveToBookmark().then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false})); return true; }

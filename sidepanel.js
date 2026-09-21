@@ -139,6 +139,7 @@ function isHttpUrl(u){
 }
 
 const TREE_CACHE_KEY = 'bookmarkTreeCacheV2';
+const DELETED_BOOKMARKS_KEY = 'deletedBookmarksHistory';
 const TREE_CACHE_TTL = 1000 * 60 * 10;
 let faviconObserver = null;
 const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
@@ -245,6 +246,7 @@ function applyI18n() {
     'btn-search': 'search',
     'btn-bulk-delete': 'delete',
     'btn-clear-closed': 'clearClosedTitle',
+    'btn-clear-deleted': 'clearDeletedTitle',
     'btn-options': 'optionsTitle'
   };
   for (const [id, key] of Object.entries(fallbackTitles)) {
@@ -679,16 +681,20 @@ function switchView(view){
   document.getElementById('view-bookmarks')?.classList.toggle('hidden', view!=='bookmarks');
   document.getElementById('view-tabs-list')?.classList.toggle('hidden', view!=='tabs');
   document.getElementById('view-closed')?.classList.toggle('hidden', view!=='closed');
+  document.getElementById('view-deleted')?.classList.toggle('hidden', view!=='deleted');
   const newFolderBtn = document.getElementById('btn-new-folder');
   const searchBtn = document.getElementById('btn-search');
   const bulkDelBtn = document.getElementById('btn-bulk-delete');
   const clearClosedBtn = document.getElementById('btn-clear-closed');
+  const clearDeletedBtn = document.getElementById('btn-clear-deleted');
   if(newFolderBtn) newFolderBtn.style.display = view==='bookmarks' ? 'flex' : 'none';
   if(searchBtn) searchBtn.style.display = view==='bookmarks' ? 'flex' : 'none';
   if(bulkDelBtn) bulkDelBtn.style.display = view==='bookmarks' ? 'flex' : 'none';
   if(clearClosedBtn) clearClosedBtn.style.display = view==='closed' ? 'flex' : 'none';
+  if(clearDeletedBtn) clearDeletedBtn.style.display = view==='deleted' ? 'flex' : 'none';
   if(view==='tabs') renderOpenTabs();
   if(view==='closed') renderClosedTabs();
+  if(view==='deleted') renderDeletedBookmarks();
 }
 async function renderOpenTabs(){
   const container = document.getElementById('tabs-container');
@@ -834,7 +840,214 @@ async function renderClosedTabs(){
   }catch(e){ console.error(e); }
 }
 
+
+async function restoreDeletedEntry(entry){
+  if(!entry || !entry.node) return false;
+  let targetParentId = entry.parentId || '2';
+  // parentが存在するか確認
+  try{
+    const parentNodes = await chrome.bookmarks.get(targetParentId);
+    if(!parentNodes[0] || parentNodes[0].url){
+      throw new Error('parent not folder');
+    }
+  }catch{
+    // フォールバック: その他のブックマーク
+    targetParentId = '2';
+  }
+
+  async function createRecursive(node, parentId, index){
+    try{
+      if(node.url){
+        const created = await chrome.bookmarks.create({
+          parentId: parentId,
+          title: node.title || node.url,
+          url: node.url,
+          index: typeof index === 'number' ? index : undefined
+        });
+        return created;
+      }else{
+        const folder = await chrome.bookmarks.create({
+          parentId: parentId,
+          title: node.title || 'Untitled folder',
+          index: typeof index === 'number' ? index : undefined
+        });
+        if(node.children && node.children.length){
+          for(let i=0;i<node.children.length;i++){
+            await createRecursive(node.children[i], folder.id);
+          }
+        }
+        return folder;
+      }
+    }catch(e){
+      // 親が無効なら fallback で再試行
+      if(parentId !== '2'){
+        try{
+          return await createRecursive(node, '2');
+        }catch{}
+      }
+      throw e;
+    }
+  }
+
+  try{
+    await createRecursive(entry.node, targetParentId, entry.index);
+    // 復元成功したら履歴から削除
+    try{
+      const { [DELETED_BOOKMARKS_KEY]: history = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+      const filtered = history.filter(h => !(h.deletedAt === entry.deletedAt && h.id === entry.id));
+      await chrome.storage.local.set({ [DELETED_BOOKMARKS_KEY]: filtered });
+    }catch{}
+    return true;
+  }catch(e){
+    console.error('restore failed', e);
+    // 失敗時は その他のブックマークにフォールバックで1回だけ再試行済み
+    try{
+      // 最終手段: 通知
+      alert(i18n('restoreFailed'));
+    }catch{}
+    return false;
+  }
+}
+
+async function renderDeletedBookmarks(){
+  const container = document.getElementById('deleted-container');
+  if(!container) return;
+  container.innerHTML = '<div style="padding:16px;color:#9aa0a6;font-size:12px;">'+i18n('loading')+'</div>';
+  try{
+    const { [DELETED_BOOKMARKS_KEY]: deletedHistory = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+    // 下位互換: 旧キー名 deletedBookmarksHistory も読む
+    let history = deletedHistory;
+    if(!history || history.length===0){
+      const alt = await chrome.storage.local.get(['deletedBookmarksHistory']);
+      if(alt.deletedBookmarksHistory && alt.deletedBookmarksHistory.length){
+        history = alt.deletedBookmarksHistory;
+      }
+    }
+    container.innerHTML = '';
+    const title = document.createElement('div');
+    title.className='section-title';
+    title.textContent = i18n('todayDeletedBookmarks', String(history.length)) || `Deleted today (${history.length})`;
+    container.appendChild(title);
+    if(history.length===0){
+      const empty = document.createElement('div');
+      empty.style.padding='16px';
+      empty.style.color='#5f6368';
+      empty.style.fontSize='12px';
+      empty.textContent = i18n('noDeletedBookmarks');
+      container.appendChild(empty);
+      const hint = document.createElement('div');
+      hint.style.padding='0 16px';
+      hint.style.color='#9aa0a6';
+      hint.style.fontSize='11px';
+      hint.textContent = i18n('deletedBookmarksHint');
+      container.appendChild(hint);
+      return;
+    }
+    for(const item of history){
+      const node = item.node || {};
+      const isFolder = !node.url;
+      const row = document.createElement('div');
+      row.className='deleted-row';
+      
+      const iconSpan = document.createElement('span');
+      iconSpan.className='icon';
+      if(isFolder){
+        iconSpan.textContent = '📁';
+      }else{
+        const img = document.createElement('img');
+        img.className='favicon';
+        img.src = TRANSPARENT_PIXEL;
+        if(node.url && isHttpUrl(node.url)){
+          img.dataset.src = getFaviconUrl(node.url);
+          img.dataset.originalUrl = node.url;
+          observeFavicon(img);
+        }else{
+          img.style.display='none';
+        }
+        iconSpan.appendChild(img);
+      }
+
+      const titleEl = document.createElement('span');
+      titleEl.className='tab-title';
+      const displayTitle = node.title || node.url || '(no title)';
+      titleEl.textContent = displayTitle;
+      titleEl.title = displayTitle + (node.url ? '\n' + node.url : '');
+
+      const badge = document.createElement('span');
+      badge.className='badge ' + (isFolder ? 'folder' : '');
+      badge.textContent = isFolder ? i18n('deletedBadgeFolder') || 'Folder' : i18n('deletedBadgeBookmark') || '';
+      if(!badge.textContent) badge.style.display='none';
+
+      const countInfo = document.createElement('span');
+      countInfo.style.fontSize='10px';
+      countInfo.style.color='#9aa0a6';
+      countInfo.style.flexShrink='0';
+      if(isFolder && node.children){
+        const total = (function count(n){ let c=0; if(!n.children) return 0; for(const ch of n.children){ c++; if(!ch.url) c+=count(ch); } return c; })(node);
+        if(total>0) countInfo.textContent = `(${total})`;
+      }
+
+      const timeBadge = document.createElement('span');
+      timeBadge.className='time-badge';
+      timeBadge.textContent = new Date(item.deletedAt).toLocaleTimeString();
+
+      const restoreBtn = document.createElement('button');
+      restoreBtn.className='restore-btn';
+      restoreBtn.textContent = i18n('restore');
+      restoreBtn.addEventListener('click', async (e)=>{
+        e.stopPropagation();
+        restoreBtn.disabled = true;
+        restoreBtn.textContent = '...';
+        const ok = await restoreDeletedEntry(item);
+        if(ok){
+          // renderはstorage.onChangedで走る
+        }else{
+          restoreBtn.disabled = false;
+          restoreBtn.textContent = i18n('restore');
+        }
+      });
+
+      row.appendChild(iconSpan);
+      row.appendChild(titleEl);
+      if(badge.textContent) row.appendChild(badge);
+      if(countInfo.textContent) row.appendChild(countInfo);
+      row.appendChild(timeBadge);
+      row.appendChild(restoreBtn);
+
+      // クリックでURLがあれば開く、フォルダなら復元
+      row.addEventListener('click', ()=>{
+        if(node.url){
+          chrome.tabs.create({url: node.url}).catch(()=>{});
+        }else{
+          // フォルダは復元を促す
+          restoreDeletedEntry(item);
+        }
+      });
+
+      // 右クリックで履歴から削除
+      row.addEventListener('contextmenu', async (e)=>{
+        e.preventDefault();
+        try{
+          const { [DELETED_BOOKMARKS_KEY]: hist = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+          const idx = hist.findIndex(h => h.deletedAt === item.deletedAt && h.id === item.id);
+          if(idx>=0){
+            hist.splice(idx,1);
+            await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: hist});
+            renderDeletedBookmarks();
+          }else{
+            // background経由も試す
+            chrome.runtime.sendMessage({type:'DELETE_DELETED_ENTRY', entryId: item.id, deletedAt: item.deletedAt}).catch(()=>{});
+          }
+        }catch{}
+      });
+
+      container.appendChild(row);
+    }
+  }catch(e){ console.error(e); container.innerHTML = '<div style="color:red;padding:8px;">Failed to load deleted bookmarks</div>'; }
+}
+
 function initSearch(){
+
   const btn = document.getElementById('btn-search');
   const wrapper = document.getElementById('search-wrapper');
   const input = document.getElementById('search-input');
@@ -884,6 +1097,18 @@ document.getElementById('btn-clear-closed')?.addEventListener('click', async ()=
     console.warn('CLEAR_TODAY_CLOSED failed', e);
   }
 });
+document.getElementById('btn-clear-deleted')?.addEventListener('click', async ()=>{
+  if (settings.confirmDelete) {
+    if (!confirm(i18n('confirmClearDeleted'))) return;
+  }
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_DELETED_BOOKMARKS' });
+  } catch (e) {
+    console.warn('CLEAR_DELETED_BOOKMARKS failed', e);
+    // フォールバック: 直接消す
+    try{ await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []}); renderDeletedBookmarks(); }catch{}
+  }
+});
 document.getElementById('btn-options')?.addEventListener('click', ()=>chrome.runtime.openOptionsPage());
 document.getElementById('btn-bulk-delete')?.addEventListener('click', handleBulkDelete);
 document.getElementById('ctx-delete')?.addEventListener('click', ()=>{ const t=contextTarget; hideContextMenu(true); deleteNodeWithTarget(t); });
@@ -926,6 +1151,12 @@ chrome.storage.onChanged.addListener((changes, area)=>{
     if(needCSS) applySettingsToCSS();
     if (changes.closedTabsHistory && currentView==='closed') {
       renderClosedTabs();
+    }
+    if (changes[DELETED_BOOKMARKS_KEY] && currentView==='deleted') {
+      renderDeletedBookmarks();
+    }
+    if (changes.deletedBookmarksHistory && currentView==='deleted') {
+      renderDeletedBookmarks();
     }
     if (changes[TREE_CACHE_KEY] && currentView==='bookmarks' && !searchQuery){
       // 他タブでキャッシュ更新されたら差分反映
@@ -977,6 +1208,7 @@ chrome.storage.onChanged.addListener((changes, area)=>{
         document.getElementById('view-bookmarks')?.classList.remove('hidden');
         document.getElementById('view-tabs-list')?.classList.add('hidden');
         document.getElementById('view-closed')?.classList.add('hidden');
+        document.getElementById('view-deleted')?.classList.add('hidden');
         renderTree(cachedTree);
         // キャッシュ表示できたのでLoadingは消える
       }catch(e){ console.warn(e); }
@@ -996,14 +1228,17 @@ chrome.storage.onChanged.addListener((changes, area)=>{
   document.getElementById('view-bookmarks')?.classList.remove('hidden');
   document.getElementById('view-tabs-list')?.classList.add('hidden');
   document.getElementById('view-closed')?.classList.add('hidden');
+  document.getElementById('view-deleted')?.classList.add('hidden');
   const newFolderBtn = document.getElementById('btn-new-folder');
   const searchBtn = document.getElementById('btn-search');
   const bulkDelBtn = document.getElementById('btn-bulk-delete');
   const clearClosedBtn = document.getElementById('btn-clear-closed');
+  const clearDeletedBtn = document.getElementById('btn-clear-deleted');
   if (newFolderBtn) newFolderBtn.style.display = 'flex';
   if (searchBtn) searchBtn.style.display = 'flex';
   if (bulkDelBtn) bulkDelBtn.style.display = 'flex';
   if (clearClosedBtn) clearClosedBtn.style.display = 'none';
+  if (clearDeletedBtn) clearDeletedBtn.style.display = 'none';
 
   try {
     const freshTree = await treePromise;

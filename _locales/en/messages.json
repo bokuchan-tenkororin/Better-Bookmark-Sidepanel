@@ -184,5 +184,46 @@
         "example": "12"
       }
     }
+  },
+  "deletedBookmarksViewTitle": {
+    "message": "Deleted bookmarks"
+  },
+  "todayDeletedBookmarks": {
+    "message": "Deleted today ($1)",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "noDeletedBookmarks": {
+    "message": "No deleted bookmarks"
+  },
+  "deletedBookmarksHint": {
+    "message": "Bookmarks deleted after installing this extension will appear here"
+  },
+  "deletedTime": {
+    "message": "Deleted: $1",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  },
+  "clearDeletedTitle": {
+    "message": "Clear deleted history"
+  },
+  "confirmClearDeleted": {
+    "message": "Clear all deleted bookmark history?"
+  },
+  "restoreFailed": {
+    "message": "Failed to restore. Original folder no longer exists, restored to Other bookmarks."
+  },
+  "deletedBadgeFolder": {
+    "message": "Folder"
+  },
+  "deletedBadgeBookmark": {
+    "message": "Bookmark"
   }
 }

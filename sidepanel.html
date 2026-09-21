@@ -12,12 +12,14 @@
       <button class="view-tab active" data-view="bookmarks" data-i18n-title="bookmarksViewTitle" title="Bookmarks">📚</button>
       <button class="view-tab" data-view="tabs" data-i18n-title="openTabsViewTitle" title="Open Tabs">🗂️</button>
       <button class="view-tab" data-view="closed" data-i18n-title="closedTabsViewTitle" title="Closed Tabs">🕘</button>
+      <button class="view-tab" data-view="deleted" data-i18n-title="deletedBookmarksViewTitle" title="Deleted Bookmarks">🗑️</button>
     </nav>
     <div id="action-btns">
       <button id="btn-new-folder" class="icon-btn" data-i18n-title="newFolder" title="New folder"><span class="ico">📁</span></button>
       <button id="btn-search" class="icon-btn" data-i18n-title="search" title="Search"><span class="ico">🔍</span></button>
       <button id="btn-bulk-delete" class="icon-btn danger" data-i18n-title="delete" title="Delete"><span class="ico">🗑️</span><span id="delete-count" class="count-badge hidden">0</span></button>
       <button id="btn-clear-closed" class="icon-btn" data-i18n-title="clearClosedTitle" title="Clear today's history" style="display:none;"><span class="ico">🧹</span></button>
+      <button id="btn-clear-deleted" class="icon-btn" data-i18n-title="clearDeletedTitle" title="Clear deleted history" style="display:none;"><span class="ico">🧹</span></button>
       <button id="btn-options" class="icon-btn" data-i18n-title="optionsTitle" title="Options"><span class="ico">⚙️</span></button>
     </div>
     <div id="search-wrapper" class="hidden">
@@ -32,6 +34,7 @@
   </div>
   <div id="view-tabs-list" class="view-panel hidden"><div id="tabs-container"></div></div>
   <div id="view-closed" class="view-panel hidden"><div id="closed-container"></div></div>
+  <div id="view-deleted" class="view-panel hidden"><div id="deleted-container"></div></div>
 </div>
 
 <div id="context-menu" class="hidden">

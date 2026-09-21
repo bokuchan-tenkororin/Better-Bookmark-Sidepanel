@@ -66,7 +66,7 @@ body {
 .small-btn { border:none; background:transparent; cursor:pointer; padding:4px; flex-shrink:0; }
 .view-panel { flex:1; overflow:auto; display:flex; flex-direction:column; width:100%; max-width:100%; }
 .view-panel.hidden { display:none; }
-#tree-container, #tabs-container, #closed-container { flex:1; overflow:auto; padding:2px 0; width:100%; max-width:100%; }
+/* replaced below */
 .tree-node { user-select:none; width:100%; max-width:100%; }
 .node-row {
   display:flex; align-items:center; gap:5px;
@@ -87,7 +87,11 @@ body {
 .node-row .node-checkbox { margin-left:auto; flex-shrink:0; width:14px; height:14px; cursor:pointer; }
 .children { padding-left:14px; width:100%; box-sizing:border-box; }
 .children.collapsed { display:none; }
-.tab-row, .closed-row {
+.tab-row.active { background: var(--bg-active); }
+.tab-row .tab-close { width:18px; height:18px; border:none; background:transparent; border-radius:50%; cursor:pointer; flex-shrink:0; }
+.tab-row .tab-close:hover { background:#e8eaed; }
+#tree-container, #tabs-container, #closed-container, #deleted-container { flex:1; overflow:auto; padding:2px 0; width:100%; max-width:100%; }
+.tab-row, .closed-row, .deleted-row {
   display:flex; align-items:center; gap:6px;
   padding: calc(1px * var(--line-height)) 8px;
   cursor:pointer; border-radius:4px; margin:1px 4px;
@@ -96,17 +100,20 @@ body {
   min-height: calc(var(--font-size) * var(--line-height) + 10px);
   width: calc(100% - 8px); max-width: calc(100% - 8px);
 }
-.tab-row:hover, .closed-row:hover { background: var(--bg-hover); }
-.tab-row.active { background: var(--bg-active); }
-.tab-row .favicon, .closed-row .favicon { width:14px; height:14px; flex-shrink:0; border-radius:2px; }
-.tab-row .tab-title, .closed-row .tab-title {
+.tab-row:hover, .closed-row:hover, .deleted-row:hover { background: var(--bg-hover); }
+.tab-row .favicon, .closed-row .favicon, .deleted-row .favicon { width:14px; height:14px; flex-shrink:0; border-radius:2px; }
+.tab-row .tab-title, .closed-row .tab-title, .deleted-row .tab-title {
   flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
   font-size: var(--font-size);
   line-height: var(--line-height);
 }
-.tab-row .tab-close { width:18px; height:18px; border:none; background:transparent; border-radius:50%; cursor:pointer; flex-shrink:0; }
-.tab-row .tab-close:hover { background:#e8eaed; }
-.closed-row .restore-btn { font-size:11px; padding:2px 6px; border:1px solid var(--border); border-radius:4px; background:white; cursor:pointer; flex-shrink:0; }
+.closed-row .restore-btn, .deleted-row .restore-btn { font-size:11px; padding:2px 6px; border:1px solid var(--border); border-radius:4px; background:white; cursor:pointer; flex-shrink:0; }
+.deleted-row .badge {
+  font-size:9px; padding:1px 4px; border-radius:3px; background:#e8eaed; color:#5f6368; flex-shrink:0;
+}
+.deleted-row .badge.folder { background:#e8f0fe; color:#1a73e8; }
+.deleted-row .time-badge { font-size:10px; color:#9aa0a6; flex-shrink:0; }
+
 #context-menu {
   position:fixed; background:white !important; border:1px solid var(--border); border-radius:8px;
   box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:1000; min-width:160px; padding:4px; display:flex; flex-direction:column;
