@@ -1,4 +1,4 @@
-// background.js v2.0 - storage.local優先 + bookmark tree cache + favicon lazy support
+// background.js v4 - 同期openで gesture を保持する版
 let isSidePanelOpen = false;
 let tabCache = {};
 let saveQueue = Promise.resolve();
@@ -11,50 +11,39 @@ const UI_KEYS = ['expandedFolders','lastSelectedFolderId'];
 const META_KEY = 'configBackupFolderId';
 const BOOKMARK_CACHE_KEY = 'bookmarkTreeCacheV2';
 const DELETED_BOOKMARKS_KEY = 'deletedBookmarksHistory';
-const DELETED_MAX = 500;
+const DELETED_SESSION_KEY = 'deletedBookmarksSessionStart';
 
-function encode(obj){ try{ return btoa(encodeURIComponent(JSON.stringify(obj))); }catch{ return null; } }
-function decode(h){ try{ return JSON.parse(decodeURIComponent(atob(h))); }catch{ return null; } }
+// ★ 重要: トップレベルで同期的に設定。openPanelOnActionClickはfalseにして手動で同期openする
+try{
+  chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: false}).catch(()=>{});
+}catch{}
 
-// storage.local優先で取得、なければsyncから移行
-async function getLocalWithSyncFallback(keys){
-  try{
-    const local = await chrome.storage.local.get(keys);
-    const missing = keys.filter(k => !(k in local));
-    if (missing.length){
-      try{
-        const sync = await chrome.storage.sync.get(missing);
-        if (Object.keys(sync).length){
-          // 移行
-          await chrome.storage.local.set(sync).catch(()=>{});
-          return {...sync, ...local};
-        }
-      }catch{}
+(async () => {
+  try {
+    if (!chrome.storage.session) return;
+    const sess = await chrome.storage.session.get(['sessionActive']);
+    if (!sess.sessionActive) {
+      await chrome.storage.session.set({sessionActive: true});
+      await chrome.storage.local.set({
+        [DELETED_BOOKMARKS_KEY]: [],
+        [DELETED_SESSION_KEY]: Date.now()
+      });
     }
-    return local;
-  }catch{
-    return {};
-  }
-}
+  } catch(e) {}
+})();
 
 async function getParentId(){
   try{
     const local = await chrome.storage.local.get([META_KEY]);
-    let configBackupFolderId = local[META_KEY];
-    if (!configBackupFolderId){
+    let id = local[META_KEY];
+    if(!id){
       const sync = await chrome.storage.sync.get([META_KEY]).catch(()=>({}));
-      configBackupFolderId = sync[META_KEY];
-      if (configBackupFolderId){
-        await chrome.storage.local.set({[META_KEY]: configBackupFolderId}).catch(()=>{});
-      }
+      id = sync[META_KEY];
+      if(id) await chrome.storage.local.set({[META_KEY]: id}).catch(()=>{});
     }
-    if(configBackupFolderId){
-      const bms=await chrome.bookmarks.get(configBackupFolderId);
-      if(bms[0]&&!bms[0].url) return configBackupFolderId;
-    }
+    if(id){ const bms=await chrome.bookmarks.get(id); if(bms[0]&&!bms[0].url) return id; }
   }catch{} return '2';
 }
-
 async function findBookmark(){
   try{
     const parentId=await getParentId();
@@ -66,22 +55,21 @@ async function findBookmark(){
     return scan(tree);
   }catch{ return null; }
 }
+function encode(o){ try{ return btoa(encodeURIComponent(JSON.stringify(o))); }catch{ return null; } }
+function decode(h){ try{ return JSON.parse(decodeURIComponent(atob(h))); }catch{ return null; } }
 async function loadFromBookmark(){
   const bm=await findBookmark();
   if(!bm?.url?.startsWith(CONFIG_PREFIX)) return null;
   return decode(bm.url.substring(CONFIG_PREFIX.length));
 }
 async function getAllSettings(){
-  // local優先
   const allKeys = [...OPTION_KEYS, META_KEY, ...UI_KEYS];
   const local = await chrome.storage.local.get(allKeys).catch(()=>({}));
   let syncPart = {};
   const missingOpt = [...OPTION_KEYS, META_KEY].filter(k=> !(k in local));
   if (missingOpt.length){
     try{ syncPart = await chrome.storage.sync.get(missingOpt); }catch{}
-    if (Object.keys(syncPart).length){
-      await chrome.storage.local.set(syncPart).catch(()=>{});
-    }
+    if (Object.keys(syncPart).length) await chrome.storage.local.set(syncPart).catch(()=>{});
   }
   const combined = {...syncPart, ...local};
   return {
@@ -113,98 +101,105 @@ async function saveToBookmark(override=null){
   }
 }
 async function restoreIfNeeded(){
-  // local優先で存在チェック
   const checkKeys = [...OPTION_KEYS, ...UI_KEYS];
   const local = await chrome.storage.local.get(checkKeys).catch(()=>({}));
   const hasOpt=OPTION_KEYS.some(k=>local[k]!==undefined);
   const hasUI=local.expandedFolders && Object.keys(local.expandedFolders).length>0;
   if(hasOpt||hasUI){ await saveToBookmark(); return; }
-  // syncもチェックして移行
   try{
     const sync=await chrome.storage.sync.get(OPTION_KEYS).catch(()=>({}));
-    const hasOptSync = OPTION_KEYS.some(k=>sync[k]!==undefined);
-    if(hasOptSync){
+    if(OPTION_KEYS.some(k=>sync[k]!==undefined)){
       await chrome.storage.local.set(sync).catch(()=>{});
-      await saveToBookmark();
-      return;
+      await saveToBookmark(); return;
     }
   }catch{}
-  const backup=await loadFromBookmark();
-  if(!backup) return;
-  if(backup.options){
-    if(Object.keys(backup.options).length) await chrome.storage.local.set(backup.options).catch(()=>{});
-    if(backup.meta?.configBackupFolderId) await chrome.storage.local.set({configBackupFolderId:backup.meta.configBackupFolderId}).catch(()=>{});
-    if(backup.ui?.expandedFolders) await chrome.storage.local.set({expandedFolders:backup.ui.expandedFolders}).catch(()=>{});
-    if(backup.ui?.lastSelectedFolderId) await chrome.storage.local.set({lastSelectedFolderId:backup.ui.lastSelectedFolderId}).catch(()=>{});
-    // 互換のためsyncにも書いておく
-    try{ await chrome.storage.sync.set(backup.options).catch(()=>{}); }catch{}
-  }
-}
-
-// ---- Bookmark Tree Cache ----
-async function refreshBookmarkTreeCache(){
   try{
-    const tree = await chrome.bookmarks.getTree();
-    await chrome.storage.local.set({[BOOKMARK_CACHE_KEY]: {tree, ts: Date.now()}});
-  }catch(e){}
+    const fromBm=await loadFromBookmark();
+    if(fromBm){
+      const opt=fromBm.options||{}; const ui=fromBm.ui||{}; const meta=fromBm.meta||{};
+      const toLocal={...opt};
+      if(ui.expandedFolders) toLocal.expandedFolders=ui.expandedFolders;
+      if(ui.lastSelectedFolderId) toLocal.lastSelectedFolderId=ui.lastSelectedFolderId;
+      if(meta.configBackupFolderId) toLocal.configBackupFolderId=meta.configBackupFolderId;
+      await chrome.storage.local.set(toLocal).catch(()=>{});
+    }
+  }catch{}
 }
-let bookmarkCacheTimer = null;
-function scheduleBookmarkCache(){
-  if(bookmarkCacheTimer) clearTimeout(bookmarkCacheTimer);
-  bookmarkCacheTimer = setTimeout(()=>{ refreshBookmarkTreeCache().catch(()=>{}); }, 250);
+function refreshBookmarkTreeCache(){
+  cacheReadyPromise=(async()=>{
+    try{ const tree=await chrome.bookmarks.getTree(); await chrome.storage.local.set({[BOOKMARK_CACHE_KEY]:{tree, ts:Date.now()}}).catch(()=>{}); }catch{}
+  })();
+  return cacheReadyPromise;
 }
-// ブックマーク変更でキャッシュ更新
-try{
-  chrome.bookmarks.onChanged.addListener(scheduleBookmarkCache);
-  chrome.bookmarks.onCreated.addListener(scheduleBookmarkCache);
-  chrome.bookmarks.onRemoved.addListener(scheduleBookmarkCache);
-  chrome.bookmarks.onMoved.addListener(scheduleBookmarkCache);
-  if (chrome.bookmarks.onChildrenReordered) chrome.bookmarks.onChildrenReordered.addListener(scheduleBookmarkCache);
-}catch{}
-
-// ---- 削除したブックマークの履歴保存 ----
-chrome.bookmarks.onRemoved.addListener((id, removeInfo) => {
-  enqueue(async () => {
-    try {
-      const node = removeInfo && removeInfo.node ? removeInfo.node : null;
-      if (!node) return;
-      // 設定用ブックマークは除外
-      if (node.title === CONFIG_TITLE && node.url && node.url.startsWith(CONFIG_PREFIX)) return;
-      // ルートIDは除外
-      if (['0','1','2','3'].includes(String(id))) return;
-      // 内部用: 空タイトルかつconfig prefix含むものも除外（二重チェック）
-      if (node.title === CONFIG_TITLE) return;
-
-      const entry = {
-        id: String(id),
-        parentId: String(removeInfo.parentId || ''),
-        index: removeInfo.index || 0,
-        node: node, // title, url, children を含む完全なノード
-        deletedAt: Date.now()
-      };
-      const { [DELETED_BOOKMARKS_KEY]: history = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
-      // 同じidが連続で入る重複を軽く防ぐ（1秒以内はスキップ）
-      if (history.length > 0) {
-        const last = history[0];
-        if (last.id === entry.id && last.node && last.node.title === entry.node.title && (Date.now() - last.deletedAt) < 1000) {
+function isConfigNode(node){
+  if(!node) return false;
+  return node.title===CONFIG_TITLE && (node.url||'').startsWith(CONFIG_PREFIX);
+}
+function stripConfigFromNode(node){
+  if(!node) return null;
+  if(isConfigNode(node)) return null;
+  if(node.children && node.children.length){
+    const filtered = [];
+    for(const ch of node.children){
+      const cleaned = stripConfigFromNode({...ch, children: ch.children ? [...ch.children] : undefined});
+      if(cleaned) filtered.push(cleaned);
+    }
+    return {...node, children: filtered};
+  }
+  return {...node};
+}
+chrome.bookmarks.onChanged.addListener(()=>{ refreshBookmarkTreeCache().catch(()=>{}); });
+chrome.bookmarks.onCreated.addListener(()=>{ refreshBookmarkTreeCache().catch(()=>{}); });
+chrome.bookmarks.onRemoved.addListener((id, removeInfo)=>{
+  try{
+    const node = removeInfo && removeInfo.node;
+    if(!node){
+      refreshBookmarkTreeCache().catch(()=>{});
+      return;
+    }
+    if(isConfigNode(node)){
+      refreshBookmarkTreeCache().catch(()=>{});
+      return;
+    }
+    if(['0','1','2','3'].includes(String(id))){
+      refreshBookmarkTreeCache().catch(()=>{});
+      return;
+    }
+    const cleanedNode = stripConfigFromNode(JSON.parse(JSON.stringify(node)));
+    if(!cleanedNode){
+      refreshBookmarkTreeCache().catch(()=>{});
+      return;
+    }
+    enqueue(async()=>{
+      try{
+        const data = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, DELETED_SESSION_KEY]);
+        let history = data[DELETED_BOOKMARKS_KEY] || [];
+        let sessionStart = data[DELETED_SESSION_KEY];
+        if(!sessionStart){
+          sessionStart = Date.now();
+          await chrome.storage.local.set({[DELETED_SESSION_KEY]: sessionStart}).catch(()=>{});
+        }
+        const now = Date.now();
+        if(history.length>0 && history[0].id===String(id) && (now - history[0].deletedAt) < 1000){
           return;
         }
-      }
-      history.unshift(entry);
-      if (history.length > DELETED_MAX) history.length = DELETED_MAX;
-      await chrome.storage.local.set({ [DELETED_BOOKMARKS_KEY]: history });
-    } catch (e) {
-      console.warn('Failed to save deleted bookmark', e);
-    }
-  });
+        const entry = {
+          id: String(id),
+          parentId: removeInfo.parentId,
+          index: typeof removeInfo.index==='number' ? removeInfo.index : 0,
+          node: cleanedNode,
+          deletedAt: now
+        };
+        history.unshift(entry);
+        if(history.length>200) history.length=200;
+        await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: history});
+      }catch(e){ console.warn('[DeletedBookmarks] save failed', e); }
+    });
+  }catch(e){ console.warn('[DeletedBookmarks] onRemoved handler error', e); }
+  refreshBookmarkTreeCache().catch(()=>{});
 });
+chrome.bookmarks.onMoved.addListener(()=>{ refreshBookmarkTreeCache().catch(()=>{}); });
 
-function initCache(){
-  const p=(async()=>{ try{ const tabs=await chrome.tabs.query({}); for(const t of tabs) if(t.id!=null) tabCache[t.id]={url:t.url||t.pendingUrl||'', title:t.title||'', favIconUrl:t.favIconUrl||''}; }catch{} })();
-  cacheReadyPromise=p;
-}
-initCache();
-chrome.tabs.onCreated.addListener(tab=>{ if(tab.id!=null) tabCache[tab.id]={url:tab.pendingUrl||tab.url||'', title:tab.title||'', favIconUrl:tab.favIconUrl||''}; });
 chrome.tabs.onUpdated.addListener((id,_,tab)=>{ const ex=tabCache[id]||{}; tabCache[id]={url:tab.url||tab.pendingUrl||ex.url||'', title:tab.title||ex.title||'', favIconUrl:tab.favIconUrl||ex.favIconUrl||''}; });
 function isRecordable(u){ if(!u) return false; if(u==='about:blank') return false; if(u.startsWith('chrome://newtab')) return false; return /^(https?|chrome|chrome-extension|edge|file|about|moz-extension):/.test(u); }
 async function fallback(){ try{ const rec=await chrome.sessions.getRecentlyClosed({maxResults:10}); for(const e of rec) if(e.tab?.url && isRecordable(e.tab.url)) return {url:e.tab.url, title:e.tab.title||e.tab.url, favIconUrl:e.tab.favIconUrl||''}; }catch{} return null; }
@@ -235,28 +230,15 @@ chrome.runtime.onInstalled.addListener(()=>{
   restoreIfNeeded().catch(()=>{});
   setTimeout(()=>refreshBookmarkTreeCache().catch(()=>{}), 500);
 });
-// v1.0.9: 起動直後は bookmarks API が重いので遅延させる
 chrome.runtime.onStartup.addListener(()=>{
   chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:false}).catch(()=>{});
-  setTimeout(()=>{ 
-    restoreIfNeeded().catch(()=>{}); 
-    refreshBookmarkTreeCache().catch(()=>{});
-  }, 1500);
+  setTimeout(()=>{ restoreIfNeeded().catch(()=>{}); refreshBookmarkTreeCache().catch(()=>{}); }, 1500);
 });
 
 let debounce=null;
 function schedule(){ if(debounce) clearTimeout(debounce); debounce=setTimeout(()=>saveToBookmark().catch(()=>{}),600); }
 chrome.storage.onChanged.addListener((ch,area)=>{
   if(area==='local' && [...OPTION_KEYS, META_KEY, ...UI_KEYS].some(k=>k in ch)) schedule();
-  // sync変更はlocalに移行してから保存
-  if(area==='sync' && [...OPTION_KEYS, META_KEY].some(k=>k in ch)){
-    const toMigrate = {};
-    for(const k of [...OPTION_KEYS, META_KEY]) if(k in ch) toMigrate[k]=ch[k].newValue;
-    if(Object.keys(toMigrate).length){
-      chrome.storage.local.set(toMigrate).catch(()=>{});
-    }
-    schedule();
-  }
 });
 
 chrome.runtime.onConnect.addListener(port=>{ if(port.name==='sidepanel'){ saveOpen(true); port.onDisconnect.addListener(()=>saveOpen(false)); } });
@@ -272,10 +254,12 @@ chrome.runtime.onMessage.addListener((msg,_,sendResponse)=>{
     }); return true;
   }
   if(msg.type==='CLEAR_DELETED_BOOKMARKS'){
-    enqueue(async()=>{
-      await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []});
-      sendResponse({ok:true});
-    }); return true;
+    enqueue(async()=>{ await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []}); sendResponse({ok:true}); }); return true;
+  }
+  if(msg.type==='GET_DELETED_SESSION'){
+    chrome.storage.local.get([DELETED_SESSION_KEY, DELETED_BOOKMARKS_KEY]).then(r=>{
+      sendResponse({sessionStart: r[DELETED_SESSION_KEY]||Date.now(), count: (r[DELETED_BOOKMARKS_KEY]||[]).length});
+    }).catch(()=>sendResponse({sessionStart: Date.now(), count: 0})); return true;
   }
   if(msg.type==='DELETE_DELETED_ENTRY'){
     enqueue(async()=>{
@@ -290,14 +274,56 @@ chrome.runtime.onMessage.addListener((msg,_,sendResponse)=>{
   if(msg.type==='SAVE_BACKUP'){ saveToBookmark().then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false})); return true; }
   if(msg.type==='RESTORE_SETTINGS'){ restoreIfNeeded().then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false})); return true; }
   if(msg.type==='GET_BOOKMARK_CACHE'){
-    chrome.storage.local.get([BOOKMARK_CACHE_KEY]).then(r=>sendResponse({cache: r[BOOKMARK_CACHE_KEY]||null})).catch(()=>sendResponse({cache:null}));
-    return true;
+    chrome.storage.local.get([BOOKMARK_CACHE_KEY]).then(r=>sendResponse({cache: r[BOOKMARK_CACHE_KEY]||null})).catch(()=>sendResponse({cache:null})); return true;
   }
   return false;
 });
 
-function closeP(){ chrome.runtime.sendMessage({type:'CLOSE_SIDEPANEL'}).catch(()=>{}); }
-function openP(winId){ if(winId) chrome.sidePanel.open({windowId:winId}).catch(()=>{}); else chrome.windows.getCurrent().then(w=>chrome.sidePanel.open({windowId:w.id}).catch(()=>{})).catch(()=>{}); }
-function toggle(winId){ if(isSidePanelOpen) closeP(); else openP(winId); }
-chrome.action.onClicked.addListener(tab=>toggle(tab?.windowId));
-chrome.commands.onCommand.addListener((_,tab)=>toggle(tab?.windowId));
+// === 修正: 同期でジェスチャーを保持したまま開閉 ===
+function closeSidePanelMsg(){
+  try{ chrome.runtime.sendMessage({type:'CLOSE_SIDEPANEL'}).catch(()=>{}); }catch{}
+}
+
+// アイコンクリック: 同期判定で即時 open/close（awaitを挟まない）
+chrome.action.onClicked.addListener((tab)=>{
+  const winId = tab?.windowId;
+  if(isSidePanelOpen){
+    // 開いている -> 閉じる（closeはジェスチャー不要）
+    closeSidePanelMsg();
+  }else{
+    // 閉じている -> 同期で開く（awaitなしでジェスチャー保持）
+    try{
+      if(winId){
+        chrome.sidePanel.open({windowId: winId}).catch(e=>console.warn('[bg] open failed', e));
+      }else{
+        chrome.windows.getCurrent().then(w=>{
+          chrome.sidePanel.open({windowId: w.id}).catch(e=>console.warn('[bg] open failed', e));
+        });
+      }
+    }catch(e){ console.warn(e); }
+  }
+});
+
+// ショートカット: 同期判定で即時 open/close
+chrome.commands.onCommand.addListener((command, tab)=>{
+  if(command !== 'toggle-panel') return;
+  const winId = tab?.windowId;
+  if(isSidePanelOpen){
+    closeSidePanelMsg();
+  }else{
+    try{
+      if(winId){
+        chrome.sidePanel.open({windowId: winId}).catch(e=>console.warn('[bg] open failed', e));
+      }else{
+        // tabが無い場合でも同期的にgetCurrentを呼ばず、まず現在のウィンドウで試す
+        // getCurrentは非同期なので、ここではopenを遅延させずに試すために
+        // chrome.windows.getCurrent()のPromiseを待たずに実行する必要があるが、
+        // windowIdが無い場合は一瞬遅れる。ジェスチャーを保持するため、
+        // 最後にフォールバックとしてgetCurrentを使う
+        chrome.windows.getCurrent().then(w=>{
+          chrome.sidePanel.open({windowId: w.id}).catch(()=>{});
+        }).catch(()=>{});
+      }
+    }catch(e){ console.warn(e); }
+  }
+});

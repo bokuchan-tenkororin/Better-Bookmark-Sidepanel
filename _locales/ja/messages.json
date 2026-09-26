@@ -188,7 +188,7 @@
     "message": "削除したブックマーク"
   },
   "todayDeletedBookmarks": {
-    "message": "今日削除したブックマーク ($1件)",
+    "message": "このセッションで削除したブックマーク ($1件)",
     "placeholders": {
       "count": {
         "content": "$1",
@@ -197,10 +197,10 @@
     }
   },
   "noDeletedBookmarks": {
-    "message": "削除したブックマークはありません"
+    "message": "このセッションで削除したブックマークはありません"
   },
   "deletedBookmarksHint": {
-    "message": "※ 拡張機能インストール後に削除したブックマークがここに表示されます"
+    "message": "※ Chrome起動後に削除したブックマークがここに表示されます。Chrome終了時にクリアされます。"
   },
   "deletedTime": {
     "message": "削除時刻: $1",
@@ -211,10 +211,10 @@
     }
   },
   "clearDeletedTitle": {
-    "message": "削除履歴をクリア"
+    "message": "このセッションの削除履歴をクリア"
   },
   "confirmClearDeleted": {
-    "message": "削除したブックマークの履歴を全てクリアしますか？"
+    "message": "このセッションで削除したブックマークの履歴をクリアしますか？"
   },
   "restoreFailed": {
     "message": "元のフォルダが見つからないため、その他のブックマークに復元しました。"
@@ -224,5 +224,13 @@
   },
   "deletedBadgeBookmark": {
     "message": "ブックマーク"
+  },
+  "deletedSessionInfo": {
+    "message": "セッション開始: $1",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
   }
 }

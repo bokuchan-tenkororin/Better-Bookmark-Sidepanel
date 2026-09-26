@@ -441,12 +441,27 @@ function createTreeNode(node){
         try{ chrome.storage.local.set({lastSelectedFolderId: node.id}).catch(()=>{}); }catch{}
       }
     }else{
-      const pos = settings.tabOpenPosition || 'end';
-      const active = settings.tabActiveBehavior || 'keep';
-      // chrome.bookmarksから直接開く
+      // 通常クリック: 今開いているタブで開く
+      // Cmd( Mac ) / Ctrl( Win ) + クリック: 新しいタブで開く
       if(node.url){
-        chrome.tabs.create({url: node.url, active: active==='activate'}).catch(()=>{});
-        // 必要なら位置調整はbackground側でやる想定だが、ここではシンプルに
+        const isNewTab = e.metaKey || e.ctrlKey;
+        if(isNewTab){
+          const pos = settings.tabOpenPosition || 'end';
+          const active = settings.tabActiveBehavior || 'keep';
+          chrome.tabs.create({url: node.url, active: active==='activate'}).catch(()=>{});
+        }else{
+          chrome.tabs.query({active:true, currentWindow:true}).then(tabs=>{
+            if(tabs && tabs[0]){
+              chrome.tabs.update(tabs[0].id, {url: node.url}).catch(()=>{});
+            }else{
+              chrome.tabs.update({url: node.url}).catch(()=>{
+                chrome.tabs.create({url: node.url}).catch(()=>{});
+              });
+            }
+          }).catch(()=>{
+            chrome.tabs.update({url: node.url}).catch(()=>{});
+          });
+        }
       }
     }
   });
@@ -568,10 +583,14 @@ function updateBulkDeleteButton(){
 function showContextMenu(x,y){
   const menu = document.getElementById('context-menu');
   if(!menu) return;
+  const openAllBtn = document.getElementById('ctx-openAll');
+  if(openAllBtn){
+    const isFolder = contextTarget && !contextTarget.url;
+    openAllBtn.style.display = isFolder ? '' : 'none';
+  }
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   menu.classList.remove('hidden');
-  // 画面外補正
   setTimeout(()=>{
     const rect = menu.getBoundingClientRect();
     if(rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
@@ -605,6 +624,8 @@ function showDialog(title, defaultValue, okText){
     titleEl.textContent = title;
     input.value = defaultValue||'';
     okBtn.textContent = okText||i18n('save');
+    // 修正: キャンセルボタンのテキストが空になる不具合を修正
+    cancelBtn.textContent = i18n('cancel') || 'キャンセル';
     overlay.classList.remove('hidden');
     input.focus();
     input.select();
@@ -632,17 +653,6 @@ async function showRenameDialogWithTarget(target){
     try{ await chrome.bookmarks.update(t.id, {title: newName}); }catch(e){ console.error(e); }
   }
 }
-async function showNewFolderDialog(){
-  const name = await showDialog(i18n('createFolderTitle'), '', i18n('create'));
-  if(!name) return;
-  let parentId = settings.lastSelectedFolderId || '1';
-  // 親がフォルダか確認
-  try{
-    const bm = await chrome.bookmarks.get(parentId);
-    if(bm[0]?.url) parentId='1';
-  }catch{ parentId='1'; }
-  try{ await chrome.bookmarks.create({parentId, title: name}); }catch(e){ console.error(e); }
-}
 function openBookmarksInFolder(folderNode){
   const urls = [];
   const collect = (n)=>{
@@ -656,6 +666,18 @@ function openBookmarksInFolder(folderNode){
   }
   urls.forEach(u=> chrome.tabs.create({url: u}).catch(()=>{}));
 }
+async function showNewFolderDialog(){
+  const name = await showDialog(i18n('createFolderTitle'), '', i18n('create'));
+  if(!name) return;
+  let parentId = settings.lastSelectedFolderId || '1';
+  // 親がフォルダか確認
+  try{
+    const bm = await chrome.bookmarks.get(parentId);
+    if(bm[0]?.url) parentId='1';
+  }catch{ parentId='1'; }
+  try{ await chrome.bookmarks.create({parentId, title: name}); }catch(e){ console.error(e); }
+}
+
 async function handleBulkDelete(){
   if(checkedIds.size===0) return;
   if(settings.confirmDelete){
@@ -914,20 +936,44 @@ async function renderDeletedBookmarks(){
   if(!container) return;
   container.innerHTML = '<div style="padding:16px;color:#9aa0a6;font-size:12px;">'+i18n('loading')+'</div>';
   try{
-    const { [DELETED_BOOKMARKS_KEY]: deletedHistory = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
-    // 下位互換: 旧キー名 deletedBookmarksHistory も読む
-    let history = deletedHistory;
-    if(!history || history.length===0){
-      const alt = await chrome.storage.local.get(['deletedBookmarksHistory']);
-      if(alt.deletedBookmarksHistory && alt.deletedBookmarksHistory.length){
-        history = alt.deletedBookmarksHistory;
-      }
+    // セッション開始時刻と履歴を取得
+    const storageData = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, 'deletedBookmarksHistory', 'deletedBookmarksSessionStart']);
+    let history = storageData[DELETED_BOOKMARKS_KEY] || storageData['deletedBookmarksHistory'] || [];
+    let sessionStart = storageData['deletedBookmarksSessionStart'] || 0;
+
+    // backgroundからセッション情報を取得（フォールバック）
+    if(!sessionStart){
+      try{
+        const resp = await chrome.runtime.sendMessage({type:'GET_DELETED_SESSION'});
+        if(resp && resp.sessionStart) sessionStart = resp.sessionStart;
+      }catch{}
     }
+
+    // セッション開始以降のものだけをフィルタ（起動〜終了までの削除のみ表示）
+    if(sessionStart){
+      history = history.filter(h => (h.deletedAt||0) >= sessionStart);
+    }
+
     container.innerHTML = '';
     const title = document.createElement('div');
     title.className='section-title';
-    title.textContent = i18n('todayDeletedBookmarks', String(history.length)) || `Deleted today (${history.length})`;
+    title.textContent = i18n('todayDeletedBookmarks', String(history.length)) || `Deleted this session (${history.length})`;
     container.appendChild(title);
+
+    // セッション開始時刻の表示（任意）
+    if(sessionStart && history.length>0){
+      const info = document.createElement('div');
+      info.style.fontSize='10px';
+      info.style.color='#9aa0a6';
+      info.style.padding='0 10px 4px';
+      try{
+        const t = new Date(sessionStart).toLocaleTimeString();
+        const msg = i18n('deletedSessionInfo', t) || `Session started: ${t}`;
+        info.textContent = msg;
+      }catch{}
+      if(info.textContent) container.appendChild(info);
+    }
+
     if(history.length===0){
       const empty = document.createElement('div');
       empty.style.padding='16px';
@@ -1014,17 +1060,14 @@ async function renderDeletedBookmarks(){
       row.appendChild(timeBadge);
       row.appendChild(restoreBtn);
 
-      // クリックでURLがあれば開く、フォルダなら復元
       row.addEventListener('click', ()=>{
         if(node.url){
           chrome.tabs.create({url: node.url}).catch(()=>{});
         }else{
-          // フォルダは復元を促す
           restoreDeletedEntry(item);
         }
       });
 
-      // 右クリックで履歴から削除
       row.addEventListener('contextmenu', async (e)=>{
         e.preventDefault();
         try{
@@ -1035,7 +1078,6 @@ async function renderDeletedBookmarks(){
             await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: hist});
             renderDeletedBookmarks();
           }else{
-            // background経由も試す
             chrome.runtime.sendMessage({type:'DELETE_DELETED_ENTRY', entryId: item.id, deletedAt: item.deletedAt}).catch(()=>{});
           }
         }catch{}
@@ -1047,34 +1089,47 @@ async function renderDeletedBookmarks(){
 }
 
 function initSearch(){
-
   const btn = document.getElementById('btn-search');
   const wrapper = document.getElementById('search-wrapper');
   const input = document.getElementById('search-input');
   const closeBtn = document.getElementById('btn-search-close');
+  const execBtn = document.getElementById('btn-search-execute');
   if(!btn||!wrapper||!input) return;
-  btn.addEventListener('click', ()=>{
-    wrapper.classList.remove('hidden');
-    input.focus();
-    btn.style.display='none';
-  });
+  
+  // 既にリスナーが付いている場合の二重登録を防止
+  if(btn.dataset.searchBound) return;
+  btn.dataset.searchBound = '1';
+
   const doSearch = ()=>{
     searchQuery = input.value.trim();
     refresh();
   };
+  
+  btn.addEventListener('click', ()=>{
+    // 既に検索バーを開いている場合は検索を実行
+    if(!wrapper.classList.contains('hidden')){
+      doSearch();
+      return;
+    }
+    wrapper.classList.remove('hidden');
+    input.focus();
+    // 検索ボタンを隠すのではなく、検索実行ボタンとして再利用できるようにする
+    // 元のUIを維持するため、ここでは非表示のままにするが、検索は即時可能
+    btn.style.display='none';
+  });
+  
   let timer=null;
   input.addEventListener('input', ()=>{
     if(timer) clearTimeout(timer);
     timer=setTimeout(doSearch, 200);
   });
-  closeBtn?.addEventListener('click', ()=>{
-    wrapper.classList.add('hidden');
-    input.value='';
-    searchQuery='';
-    document.getElementById('btn-search').style.display='flex';
-    refresh();
-  });
+  
+  // 明示的な検索実行（Enterキー）
   input.addEventListener('keydown', (e)=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      doSearch();
+    }
     if(e.key==='Escape'){
       wrapper.classList.add('hidden');
       input.value='';
@@ -1082,6 +1137,19 @@ function initSearch(){
       document.getElementById('btn-search').style.display='flex';
       refresh();
     }
+  });
+
+  closeBtn?.addEventListener('click', ()=>{
+    wrapper.classList.add('hidden');
+    input.value='';
+    searchQuery='';
+    document.getElementById('btn-search').style.display='flex';
+    refresh();
+  });
+  
+  // 追加: 検索実行ボタンのクリック
+  execBtn?.addEventListener('click', ()=>{
+    doSearch();
   });
 }
 
@@ -1112,11 +1180,15 @@ document.getElementById('btn-clear-deleted')?.addEventListener('click', async ()
 document.getElementById('btn-options')?.addEventListener('click', ()=>chrome.runtime.openOptionsPage());
 document.getElementById('btn-bulk-delete')?.addEventListener('click', handleBulkDelete);
 document.getElementById('ctx-delete')?.addEventListener('click', ()=>{ const t=contextTarget; hideContextMenu(true); deleteNodeWithTarget(t); });
-document.getElementById('ctx-rename')?.addEventListener('click', ()=>{ const t=contextTarget; hideContextMenu(true); showRenameDialogWithTarget(t); });
 document.getElementById('ctx-openAll')?.addEventListener('click', async ()=>{
   const target=contextTarget; hideContextMenu(true); if(!target) return;
-  try{ const subTree=await chrome.bookmarks.getSubTree(target.id); if(subTree[0]) openBookmarksInFolder(subTree[0]); }catch(e){ console.error(e); }
+  try{
+    const subTree=await chrome.bookmarks.getSubTree(target.id);
+    if(subTree[0]) openBookmarksInFolder(subTree[0]);
+  }catch(e){ console.error(e); }
 });
+document.getElementById('ctx-rename')?.addEventListener('click', ()=>{ const t=contextTarget; hideContextMenu(true); showRenameDialogWithTarget(t); });
+
 document.addEventListener('click', e=>{
   if(!e.target.closest('#context-menu')){ const m=document.getElementById('context-menu'); if(m && !m.classList.contains('hidden')) hideContextMenu(false); }
 });
@@ -1126,9 +1198,62 @@ document.querySelectorAll('.view-tab').forEach(btn=>{
   btn.addEventListener('click', ()=>switchView(btn.dataset.view));
 });
 
+function isConfigNodeForDelete(node){
+  if(!node) return false;
+  return node.title===CONFIG_TITLE && (node.url||'').startsWith(CONFIG_PREFIX);
+}
+function stripConfigForDelete(node){
+  if(!node) return null;
+  if(isConfigNodeForDelete(node)) return null;
+  if(node.children && node.children.length){
+    const filtered=[];
+    for(const ch of node.children){
+      const copy = {...ch, children: ch.children ? [...ch.children] : undefined};
+      const cleaned = stripConfigForDelete(copy);
+      if(cleaned) filtered.push(cleaned);
+    }
+    return {...node, children: filtered};
+  }
+  return {...node};
+}
+async function saveDeletedBookmarkFallback(id, removeInfo){
+  try{
+    const node = removeInfo && removeInfo.node;
+    if(!node) return;
+    if(isConfigNodeForDelete(node)) return;
+    if(['0','1','2','3'].includes(String(id))) return;
+    const cleaned = stripConfigForDelete(JSON.parse(JSON.stringify(node)));
+    if(!cleaned) return;
+    const data = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, 'deletedBookmarksHistory', 'deletedBookmarksSessionStart']);
+    let history = data[DELETED_BOOKMARKS_KEY] || data['deletedBookmarksHistory'] || [];
+    let sessionStart = data['deletedBookmarksSessionStart'];
+    if(!sessionStart){
+      sessionStart = Date.now();
+      await chrome.storage.local.set({deletedBookmarksSessionStart: sessionStart}).catch(()=>{});
+    }
+    const now = Date.now();
+    if(history.length>0 && history[0].id===String(id) && (now - history[0].deletedAt) < 1000){
+      return;
+    }
+    const entry = {
+      id: String(id),
+      parentId: removeInfo.parentId,
+      index: typeof removeInfo.index==='number' ? removeInfo.index : 0,
+      node: cleaned,
+      deletedAt: now
+    };
+    history.unshift(entry);
+    if(history.length>200) history.length=200;
+    await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: history});
+  }catch(e){ console.warn('[DeletedBookmarks] sidepanel fallback save failed', e); }
+}
+
 chrome.bookmarks.onChanged.addListener(refresh);
 chrome.bookmarks.onCreated.addListener(refresh);
-chrome.bookmarks.onRemoved.addListener(refresh);
+chrome.bookmarks.onRemoved.addListener((id, removeInfo)=>{
+  saveDeletedBookmarkFallback(id, removeInfo).catch(()=>{});
+  refresh();
+});
 chrome.bookmarks.onMoved.addListener(refresh);
 if (chrome.bookmarks.onChildrenReordered) chrome.bookmarks.onChildrenReordered.addListener(refresh);
 chrome.tabs.onCreated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); });
@@ -1152,10 +1277,7 @@ chrome.storage.onChanged.addListener((changes, area)=>{
     if (changes.closedTabsHistory && currentView==='closed') {
       renderClosedTabs();
     }
-    if (changes[DELETED_BOOKMARKS_KEY] && currentView==='deleted') {
-      renderDeletedBookmarks();
-    }
-    if (changes.deletedBookmarksHistory && currentView==='deleted') {
+    if ((changes[DELETED_BOOKMARKS_KEY] || changes.deletedBookmarksHistory || changes.deletedBookmarksSessionStart) && currentView==='deleted') {
       renderDeletedBookmarks();
     }
     if (changes[TREE_CACHE_KEY] && currentView==='bookmarks' && !searchQuery){
@@ -1180,14 +1302,33 @@ chrome.storage.onChanged.addListener((changes, area)=>{
 });
 
 (async function init(){
-  applyI18n();
-  initFaviconObserver();
-  connectToBackground();
-  initSearch();
-  const container = document.getElementById('tree-container');
-  if (container) {
-    container.innerHTML = '<div style="padding:16px;color:#9aa0a6;font-size:12px;text-align:center;">'+i18n('loading')+'</div>';
-  }
+  try{ applyI18n(); }catch{}
+  try{ connectToBackground(); }catch{}
+  try{ initSearch(); }catch{}
+  // ---- セッション判定: storage.session が空なら新しいブラウザセッション ----
+  try{
+    if(chrome.storage.session){
+      const sess = await chrome.storage.session.get(['sessionActive']).catch(()=>({}));
+      if(!sess.sessionActive){
+        // 新セッション検出 -> 削除履歴をクリア
+        await chrome.storage.session.set({sessionActive: true}).catch(()=>{});
+        try{
+          await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: [], deletedBookmarksSessionStart: Date.now()});
+        }catch{}
+        console.log('[DeletedBookmarks] New browser session detected in sidepanel, cleared');
+      }
+    } else {
+      // storage.session が使えない環境では、日付ベースのフォールバック
+      const {deletedBookmarksSessionStart} = await chrome.storage.local.get(['deletedBookmarksSessionStart']).catch(()=>({}));
+      if(deletedBookmarksSessionStart){
+        const age = Date.now() - deletedBookmarksSessionStart;
+        // 12時間以上経過していたら新セッションとみなす（PCスリープ対策）
+        if(age > 12*60*60*1000){
+          await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: [], deletedBookmarksSessionStart: Date.now()}).catch(()=>{});
+        }
+      }
+    }
+  }catch(e){ console.warn('session check in sidepanel failed', e); }
 
   // 設定は裏で読み込みつつ、キャッシュは0msで即表示
   const settingsPromise = loadSettings();
