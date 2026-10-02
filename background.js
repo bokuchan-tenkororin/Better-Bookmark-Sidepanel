@@ -3,6 +3,9 @@ let isSidePanelOpen = false;
 let tabCache = {};
 let saveQueue = Promise.resolve();
 let cacheReadyPromise = null;
+let bookmarkCacheTimer = null;
+let scheduledCacheRefresh = null;
+let resolveScheduledCacheRefresh = null;
 
 const CONFIG_TITLE = '⚙️ Better Bookmark Sidepanel Config - DO NOT DELETE';
 const CONFIG_PREFIX = 'https://config.better-bookmark-sidepanel.local/#';
@@ -18,19 +21,66 @@ try{
   chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: false}).catch(()=>{});
 }catch{}
 
-(async () => {
+async function initializeDeletedBookmarkSession(){
   try {
-    if (!chrome.storage.session) return;
-    const sess = await chrome.storage.session.get(['sessionActive']);
-    if (!sess.sessionActive) {
-      await chrome.storage.session.set({sessionActive: true});
-      await chrome.storage.local.set({
+    const now = Date.now();
+    if(chrome.storage.session){
+      const sess = await chrome.storage.session.get(['sessionActive']);
+      if(sess.sessionActive) return;
+      await enqueue(()=>chrome.storage.local.set({
         [DELETED_BOOKMARKS_KEY]: [],
-        [DELETED_SESSION_KEY]: Date.now()
-      });
+        [DELETED_SESSION_KEY]: now
+      }));
+      await chrome.storage.session.set({sessionActive: true});
+      return;
     }
-  } catch(e) {}
-})();
+
+    const data = await chrome.storage.local.get([DELETED_SESSION_KEY]);
+    const sessionStart = data[DELETED_SESSION_KEY] || 0;
+    if(!sessionStart || now - sessionStart > 12 * 60 * 60 * 1000){
+      await enqueue(()=>chrome.storage.local.set({
+        [DELETED_BOOKMARKS_KEY]: [],
+        [DELETED_SESSION_KEY]: now
+      }));
+    }
+  }catch(error){
+    console.warn('[DeletedBookmarks] session initialization failed', error);
+  }
+}
+let deletedBookmarkSessionReady = initializeDeletedBookmarkSession();
+
+function reportDeletedBookmarkSaveFailure(error){
+  console.warn('[DeletedBookmarks] save failed', error);
+  try{
+    chrome.runtime.sendMessage({type: 'DELETED_BOOKMARK_SAVE_FAILED'}).catch(()=>{});
+  }catch{}
+}
+
+function reportDeletedBookmarkHistoryPruned(){
+  try{
+    chrome.runtime.sendMessage({type: 'DELETED_BOOKMARK_HISTORY_PRUNED'}).catch(()=>{});
+  }catch{}
+}
+
+async function saveDeletedBookmarkEntry(entry){
+  const data = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
+  const history = data[DELETED_BOOKMARKS_KEY] || [];
+  history.unshift(entry);
+  if(history.length > 200) history.length = 200;
+  let prunedForQuota = false;
+
+  while(true){
+    try{
+      await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: history});
+      return prunedForQuota;
+    }catch(error){
+      const isQuotaError = /quota/i.test(String(error?.message || error));
+      if(!isQuotaError || history.length <= 1) throw error;
+      history.pop();
+      prunedForQuota = true;
+    }
+  }
+}
 
 async function getParentId(){
   try{
@@ -126,10 +176,25 @@ async function restoreIfNeeded(){
   }catch{}
 }
 function refreshBookmarkTreeCache(){
-  cacheReadyPromise=(async()=>{
-    try{ const tree=await chrome.bookmarks.getTree(); await chrome.storage.local.set({[BOOKMARK_CACHE_KEY]:{tree, ts:Date.now()}}).catch(()=>{}); }catch{}
-  })();
-  return cacheReadyPromise;
+  if(bookmarkCacheTimer) clearTimeout(bookmarkCacheTimer);
+  if(!scheduledCacheRefresh){
+    scheduledCacheRefresh = new Promise(resolve=>{ resolveScheduledCacheRefresh = resolve; });
+  }
+  bookmarkCacheTimer = setTimeout(async()=>{
+    bookmarkCacheTimer = null;
+    const resolveRefresh = resolveScheduledCacheRefresh;
+    scheduledCacheRefresh = null;
+    resolveScheduledCacheRefresh = null;
+    cacheReadyPromise = (async()=>{
+      try{
+        const tree = await chrome.bookmarks.getTree();
+        await chrome.storage.local.set({[BOOKMARK_CACHE_KEY]: {tree, ts: Date.now()}}).catch(()=>{});
+      }catch{}
+    })();
+    await cacheReadyPromise;
+    resolveRefresh?.();
+  }, 60);
+  return scheduledCacheRefresh;
 }
 function isConfigNode(node){
   if(!node) return false;
@@ -172,17 +237,14 @@ chrome.bookmarks.onRemoved.addListener((id, removeInfo)=>{
     }
     enqueue(async()=>{
       try{
-        const data = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, DELETED_SESSION_KEY]);
-        let history = data[DELETED_BOOKMARKS_KEY] || [];
+        await deletedBookmarkSessionReady;
+        const data = await chrome.storage.local.get([DELETED_SESSION_KEY]);
         let sessionStart = data[DELETED_SESSION_KEY];
         if(!sessionStart){
           sessionStart = Date.now();
-          await chrome.storage.local.set({[DELETED_SESSION_KEY]: sessionStart}).catch(()=>{});
+          await chrome.storage.local.set({[DELETED_SESSION_KEY]: sessionStart});
         }
         const now = Date.now();
-        if(history.length>0 && history[0].id===String(id) && (now - history[0].deletedAt) < 1000){
-          return;
-        }
         const entry = {
           id: String(id),
           parentId: removeInfo.parentId,
@@ -190,10 +252,9 @@ chrome.bookmarks.onRemoved.addListener((id, removeInfo)=>{
           node: cleanedNode,
           deletedAt: now
         };
-        history.unshift(entry);
-        if(history.length>200) history.length=200;
-        await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: history});
-      }catch(e){ console.warn('[DeletedBookmarks] save failed', e); }
+        const pruned = await saveDeletedBookmarkEntry(entry);
+        if(pruned) reportDeletedBookmarkHistoryPruned();
+      }catch(error){ reportDeletedBookmarkSaveFailure(error); }
     });
   }catch(e){ console.warn('[DeletedBookmarks] onRemoved handler error', e); }
   refreshBookmarkTreeCache().catch(()=>{});
@@ -203,7 +264,11 @@ chrome.bookmarks.onMoved.addListener(()=>{ refreshBookmarkTreeCache().catch(()=>
 chrome.tabs.onUpdated.addListener((id,_,tab)=>{ const ex=tabCache[id]||{}; tabCache[id]={url:tab.url||tab.pendingUrl||ex.url||'', title:tab.title||ex.title||'', favIconUrl:tab.favIconUrl||ex.favIconUrl||''}; });
 function isRecordable(u){ if(!u) return false; if(u==='about:blank') return false; if(u.startsWith('chrome://newtab')) return false; return /^(https?|chrome|chrome-extension|edge|file|about|moz-extension):/.test(u); }
 async function fallback(){ try{ const rec=await chrome.sessions.getRecentlyClosed({maxResults:10}); for(const e of rec) if(e.tab?.url && isRecordable(e.tab.url)) return {url:e.tab.url, title:e.tab.title||e.tab.url, favIconUrl:e.tab.favIconUrl||''}; }catch{} return null; }
-function enqueue(t){ saveQueue=saveQueue.then(t).catch(()=>{}); }
+function enqueue(t){
+  const task = saveQueue.catch(()=>{}).then(t);
+  saveQueue = task.catch(()=>{});
+  return task;
+}
 chrome.tabs.onRemoved.addListener(tabId=>{
   enqueue(async()=>{
     try{
@@ -254,12 +319,29 @@ chrome.runtime.onMessage.addListener((msg,_,sendResponse)=>{
     }); return true;
   }
   if(msg.type==='CLEAR_DELETED_BOOKMARKS'){
-    enqueue(async()=>{ await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []}); sendResponse({ok:true}); }); return true;
+    enqueue(async()=>{
+      try{
+        await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []});
+        sendResponse({ok:true});
+      }catch(error){
+        reportDeletedBookmarkSaveFailure(error);
+        sendResponse({ok:false});
+      }
+    });
+    return true;
   }
   if(msg.type==='GET_DELETED_SESSION'){
-    chrome.storage.local.get([DELETED_SESSION_KEY, DELETED_BOOKMARKS_KEY]).then(r=>{
-      sendResponse({sessionStart: r[DELETED_SESSION_KEY]||Date.now(), count: (r[DELETED_BOOKMARKS_KEY]||[]).length});
-    }).catch(()=>sendResponse({sessionStart: Date.now(), count: 0})); return true;
+    Promise.resolve(deletedBookmarkSessionReady)
+      .then(()=>chrome.storage.local.get([DELETED_SESSION_KEY, DELETED_BOOKMARKS_KEY]))
+      .then(r=>{
+        const history = r[DELETED_BOOKMARKS_KEY] || [];
+        sendResponse({
+          sessionStart: r[DELETED_SESSION_KEY] || Date.now(),
+          count: history.length
+        });
+      })
+      .catch(()=>sendResponse({sessionStart: Date.now(), count: 0}));
+    return true;
   }
   if(msg.type==='DELETE_DELETED_ENTRY'){
     enqueue(async()=>{

@@ -219,6 +219,21 @@
   "restoreFailed": {
     "message": "元のフォルダが見つからないため、その他のブックマークに復元しました。"
   },
+  "bookmarkMoveComplete": {
+    "message": "ブックマークを移動しました"
+  },
+  "bookmarkMoveFailed": {
+    "message": "ブックマークを移動できませんでした"
+  },
+  "deletedBookmarkSaveFailed": {
+    "message": "削除したブックマークを履歴に保存できませんでした"
+  },
+  "deletedBookmarkHistoryUpdateFailed": {
+    "message": "削除履歴を更新できませんでした"
+  },
+  "deletedBookmarkHistoryPruned": {
+    "message": "保存容量のため、古い削除履歴を一部削除しました"
+  },
   "deletedBadgeFolder": {
     "message": "フォルダ"
   },

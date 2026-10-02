@@ -220,6 +220,21 @@
   "restoreFailed": {
     "message": "Failed to restore. Original folder no longer exists, restored to Other bookmarks."
   },
+  "bookmarkMoveComplete": {
+    "message": "Bookmark moved"
+  },
+  "bookmarkMoveFailed": {
+    "message": "Could not move bookmark"
+  },
+  "deletedBookmarkSaveFailed": {
+    "message": "Could not save the deleted bookmark to history"
+  },
+  "deletedBookmarkHistoryUpdateFailed": {
+    "message": "Could not update deleted bookmark history"
+  },
+  "deletedBookmarkHistoryPruned": {
+    "message": "Older deleted bookmark history was removed to save space"
+  },
   "deletedBadgeFolder": {
     "message": "Folder"
   },

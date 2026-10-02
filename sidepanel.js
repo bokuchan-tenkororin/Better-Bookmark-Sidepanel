@@ -121,11 +121,13 @@ function isUserBookmark(node){
 let settings = { ...DEFAULT_SETTINGS };
 let searchQuery = '';
 let contextTarget = null;
-let dragState = { draggedId: null, dropTarget: null, dropPosition: null };
+let dragState = { draggedId: null };
 let dialogCallback = null;
 let sidePanelPort = null;
 let currentView = 'bookmarks';
 let checkedIds = new Set();
+let operationStatusTimer = null;
+let lastRenderedTree = null;
 
 // ---- Performance: caches ----
 const faviconMemoryCache = new Map();
@@ -143,6 +145,26 @@ const DELETED_BOOKMARKS_KEY = 'deletedBookmarksHistory';
 const TREE_CACHE_TTL = 1000 * 60 * 10;
 let faviconObserver = null;
 const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+function isConfigBookmark(node){
+  return node?.title === CONFIG_TITLE && node.url?.startsWith(CONFIG_PREFIX);
+}
+
+function sameBookmarkTree(a, b){
+  if(a === b) return true;
+  if(!Array.isArray(a) || !Array.isArray(b)) return false;
+  const visibleA = a.filter(node=>!isConfigBookmark(node));
+  const visibleB = b.filter(node=>!isConfigBookmark(node));
+  if(visibleA.length !== visibleB.length) return false;
+  for(let i=0; i<visibleA.length; i++){
+    const left = visibleA[i];
+    const right = visibleB[i];
+    if(left.id !== right.id || left.index !== right.index || left.parentId !== right.parentId ||
+       left.title !== right.title || left.url !== right.url) return false;
+    if(!sameBookmarkTree(left.children || [], right.children || [])) return false;
+  }
+  return true;
+}
 
 function initFaviconObserver(){
   try{ if(faviconObserver) faviconObserver.disconnect(); }catch{}
@@ -220,6 +242,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'PING_SIDEPANEL') {
     sendResponse({ open: true });
+    return true;
+  }
+  if(msg.type === 'DELETED_BOOKMARK_SAVE_FAILED'){
+    setOperationStatus('deletedBookmarkSaveFailed');
+    sendResponse({received: true});
+    return true;
+  }
+  if(msg.type === 'DELETED_BOOKMARK_HISTORY_PRUNED'){
+    setOperationStatus('deletedBookmarkHistoryPruned');
+    sendResponse({received: true});
     return true;
   }
   return false;
@@ -341,8 +373,8 @@ function filterTreeNodes(nodes, query){
 function renderTree(tree){
   const container = document.getElementById('tree-container');
   if(!container) return;
-  // 既存observerの監視解除は新しいobserverで自動的に切れるが、念のため
-  // containerクリア前にunobserveは不要（disconnectでOKだが、再生成する）
+  lastRenderedTree = tree;
+  initFaviconObserver();
   container.innerHTML = '';
   let nodes = tree;
   if(Array.isArray(tree) && tree.length===1 && tree[0].children){
@@ -366,12 +398,83 @@ function renderTree(tree){
     }
   }
 
-  // キャッシュ保存（0ms表示用に裏で更新）
-  try{
-    chrome.storage.local.set({[TREE_CACHE_KEY]: {tree, ts: Date.now()}}).catch(()=>{});
-  }catch{}
-
   updateBulkDeleteButton();
+}
+
+function setOperationStatus(key){
+  const status = document.getElementById('operation-status');
+  if(!status) return;
+  status.textContent = i18n(key);
+  status.classList.add('visible');
+  clearTimeout(operationStatusTimer);
+  operationStatusTimer = setTimeout(()=>status.classList.remove('visible'), 2400);
+}
+
+function populateFolderChildren(childrenDiv, children){
+  const fragment = document.createDocumentFragment();
+  for(const child of children || []){
+    if(isConfigBookmark(child)) continue;
+    const childEl = createTreeNode(child);
+    if(childEl) fragment.appendChild(childEl);
+  }
+  childrenDiv.appendChild(fragment);
+  childrenDiv.dataset.populated = 'true';
+}
+
+async function performBookmarkDrop(draggedId, targetId, position){
+  if(!draggedId || !targetId || String(draggedId) === String(targetId)) return false;
+  if(isRootBookmarkId(draggedId)) return false;
+
+  try{
+    const [source] = await chrome.bookmarks.get(String(draggedId));
+    const [target] = await chrome.bookmarks.get(String(targetId));
+    if(!source || !target || source.unmodifiable === 'managed'){
+      setOperationStatus('bookmarkMoveFailed');
+      return false;
+    }
+
+    let parentId;
+    let index;
+    if(position === 'inside'){
+      if(target.url || target.unmodifiable === 'managed'){
+        setOperationStatus('bookmarkMoveFailed');
+        return false;
+      }
+      parentId = String(target.id);
+      if(!source.url){
+        const subtree = await chrome.bookmarks.getSubTree(String(source.id));
+        const containsTarget = (nodes)=>nodes.some(item=>
+          String(item.id) === String(target.id) || (item.children && containsTarget(item.children))
+        );
+        if(containsTarget(subtree)){
+          setOperationStatus('bookmarkMoveFailed');
+          return false;
+        }
+      }
+    }else{
+      parentId = String(target.parentId || '');
+      if(!parentId || parentId === '0'){
+        setOperationStatus('bookmarkMoveFailed');
+        return false;
+      }
+      const siblings = await chrome.bookmarks.getChildren(parentId);
+      const remaining = siblings.filter(item=>String(item.id) !== String(source.id));
+      const targetIndex = remaining.findIndex(item=>String(item.id) === String(target.id));
+      if(targetIndex < 0){
+        setOperationStatus('bookmarkMoveFailed');
+        return false;
+      }
+      index = targetIndex + (position === 'after' ? 1 : 0);
+    }
+
+    const moved = await safeBookmarkMove(source.id, {parentId, ...(index === undefined ? {} : {index})});
+    setOperationStatus(moved ? 'bookmarkMoveComplete' : 'bookmarkMoveFailed');
+    return moved;
+  }catch(error){
+    console.warn('Bookmark drop failed', error);
+    setOperationStatus('bookmarkMoveFailed');
+    return false;
+  }
 }
 
 function createTreeNode(node){
@@ -436,7 +539,16 @@ function createTreeNode(node){
       row.classList.toggle('expanded', !expanded);
       chrome.storage.local.set({expandedFolders: settings.expandedFolders}).catch(()=>{});
       const childrenDiv = wrapper.querySelector(':scope > .children');
-      if(childrenDiv) childrenDiv.classList.toggle('collapsed', expanded);
+      if(childrenDiv){
+        if(expanded){
+          childrenDiv.classList.add('collapsed');
+        }else{
+          if(childrenDiv.dataset.populated !== 'true'){
+            populateFolderChildren(childrenDiv, node.children);
+          }
+          childrenDiv.classList.remove('collapsed');
+        }
+      }
       if(!expanded && node.id){
         try{ chrome.storage.local.set({lastSelectedFolderId: node.id}).catch(()=>{}); }catch{}
       }
@@ -480,81 +592,70 @@ function createTreeNode(node){
     e.dataTransfer.setData('text/plain', node.id);
     e.dataTransfer.effectAllowed = 'move';
   });
+  row.addEventListener('dragend', ()=>{
+    dragState.draggedId = null;
+    row.classList.remove('drop-before','drop-after','drop-inside');
+  });
   row.addEventListener('dragover', (e)=>{
     const draggedId = dragState.draggedId || e.dataTransfer.getData('text/plain');
-    if (draggedId && isRootBookmarkId(draggedId)) { e.dataTransfer.dropEffect = 'none'; return; }
-    e.preventDefault();
-    const rect = row.getBoundingClientRect();
-    const mid = rect.top + rect.height/2;
-    if(e.clientY < mid){
-      dragState.dropPosition = 'before';
-      row.style.borderTop = '2px solid #1a73e8';
-      row.style.borderBottom = '';
-    }else{
-      dragState.dropPosition = 'after';
-      row.style.borderBottom = '2px solid #1a73e8';
-      row.style.borderTop = '';
+    if (!draggedId || isRootBookmarkId(draggedId) || String(draggedId) === String(node.id)) {
+      e.dataTransfer.dropEffect = 'none';
+      return;
     }
-    dragState.dropTarget = node.id;
+    if(!isFolder && String(node.parentId || '') === '0'){
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = row.getBoundingClientRect();
+    const ratio = (e.clientY - rect.top) / Math.max(rect.height, 1);
+    let position = 'before';
+    if(isFolder && ratio >= 0.3 && ratio <= 0.7) position = 'inside';
+    else if(ratio > 0.7) position = 'after';
+    row.classList.toggle('drop-before', position === 'before');
+    row.classList.toggle('drop-after', position === 'after');
+    row.classList.toggle('drop-inside', position === 'inside');
+    row.dataset.dropPosition = position;
+    e.dataTransfer.dropEffect = 'move';
   });
-  row.addEventListener('dragleave', ()=>{
-    row.style.borderTop = '';
-    row.style.borderBottom = '';
+  row.addEventListener('dragleave', (e)=>{
+    if(e.relatedTarget && row.contains(e.relatedTarget)) return;
+    row.classList.remove('drop-before','drop-after','drop-inside');
+    delete row.dataset.dropPosition;
   });
   row.addEventListener('drop', async (e)=>{
     e.preventDefault();
-    row.style.borderTop = '';
-    row.style.borderBottom = '';
+    e.stopPropagation();
+    row.classList.remove('drop-before','drop-after','drop-inside');
     const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
-    if(!draggedId || draggedId===node.id) return;
-    if(isRootBookmarkId(draggedId)) return;
-    try{
-      if(dragState.dropPosition==='before' || dragState.dropPosition==='after'){
-        const parent = await chrome.bookmarks.get(node.id).then(b=>b[0]?.parentId).catch(()=>null);
-        if(parent){
-          if(String(parent) === '0'){ console.warn('Blocked: cannot reorder root folders (parent 0) - Chrome spec'); return; }
-          const siblings = await chrome.bookmarks.getChildren(parent);
-          const idx = siblings.findIndex(s=>s.id===node.id);
-          const newIdx = dragState.dropPosition==='before' ? idx : idx+1;
-          await safeBookmarkMove(draggedId, {parentId: parent, index: newIdx});
-        }
-      }else{
-        // folderに移動はchildren側で処理
-      }
-    }catch(err){ console.warn(err); }
+    const position = row.dataset.dropPosition;
+    delete row.dataset.dropPosition;
+    if(position) await performBookmarkDrop(draggedId, node.id, position);
   });
 
   wrapper.appendChild(row);
 
-  if(isFolder && node.children && node.children.length){
+  if(isFolder){
     const childrenDiv = document.createElement('div');
     childrenDiv.className = 'children' + (settings.expandedFolders[node.id] ? '' : ' collapsed');
-    // 検索時は強制展開
+    const shouldPopulate = !!settings.expandedFolders[node.id] || !!searchQuery;
     if(searchQuery) childrenDiv.classList.remove('collapsed');
-    for(const child of node.children){
-      if(child.title===CONFIG_TITLE && child.url?.startsWith(CONFIG_PREFIX)) continue;
-      const childEl = createTreeNode(child);
-      if(childEl) childrenDiv.appendChild(childEl);
+    if(shouldPopulate){
+      populateFolderChildren(childrenDiv, node.children);
     }
-    childrenDiv.addEventListener('dragover', (e)=>{ 
+    childrenDiv.addEventListener('dragover', (e)=>{
       const draggedId = dragState.draggedId || e.dataTransfer.getData('text/plain');
-      if(draggedId && isRootBookmarkId(draggedId)){ e.dataTransfer.dropEffect='none'; return; }
-      // 1,2はrootだが、中にブックマークを入れるのは許可 (Chrome仕様ではOK)
-      if(String(node.id) === '0'){ e.dataTransfer.dropEffect='none'; return; }
-      if(node.unmodifiable === 'managed'){ e.dataTransfer.dropEffect='none'; return; }
-      e.preventDefault(); 
-      childrenDiv.style.background='rgba(26,115,232,0.08)'; 
+      if(!draggedId || isRootBookmarkId(draggedId) || String(draggedId) === String(node.id)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
     });
-    childrenDiv.addEventListener('dragleave', ()=>{ childrenDiv.style.background=''; });
     childrenDiv.addEventListener('drop', async (e)=>{
       e.preventDefault();
-      childrenDiv.style.background='';
+      e.stopPropagation();
       const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
-      if(!draggedId || draggedId===node.id) return;
-      if(isRootBookmarkId(draggedId)) return;
-      if(String(node.id) === '0') return;
-      if(node.unmodifiable === 'managed') return;
-      try{ await safeBookmarkMove(draggedId, {parentId: node.id}); }catch(err){ console.warn(err); }
+      await performBookmarkDrop(draggedId, node.id, 'inside');
     });
     wrapper.appendChild(childrenDiv);
   }
@@ -688,11 +789,6 @@ async function handleBulkDelete(){
   updateBulkDeleteButton();
   for(const id of ids){
     try{ await chrome.bookmarks.removeTree(id); }catch{ try{ await chrome.bookmarks.remove(id); }catch{} }
-  }
-}
-function refresh(){
-  if(currentView==='bookmarks'){
-    getTree().then(t=>{ renderTree(t); }).catch(()=>{});
   }
 }
 function switchView(view){
@@ -913,12 +1009,15 @@ async function restoreDeletedEntry(entry){
 
   try{
     await createRecursive(entry.node, targetParentId, entry.index);
-    // 復元成功したら履歴から削除
+    // Remove the history item through the background queue.
     try{
-      const { [DELETED_BOOKMARKS_KEY]: history = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
-      const filtered = history.filter(h => !(h.deletedAt === entry.deletedAt && h.id === entry.id));
-      await chrome.storage.local.set({ [DELETED_BOOKMARKS_KEY]: filtered });
-    }catch{}
+      const response = await chrome.runtime.sendMessage({
+        type: 'DELETE_DELETED_ENTRY',
+        entryId: entry.id,
+        deletedAt: entry.deletedAt
+      });
+      if(!response?.ok) setOperationStatus('deletedBookmarkHistoryUpdateFailed');
+    }catch{ setOperationStatus('deletedBookmarkHistoryUpdateFailed'); }
     return true;
   }catch(e){
     console.error('restore failed', e);
@@ -936,18 +1035,15 @@ async function renderDeletedBookmarks(){
   if(!container) return;
   container.innerHTML = '<div style="padding:16px;color:#9aa0a6;font-size:12px;">'+i18n('loading')+'</div>';
   try{
-    // セッション開始時刻と履歴を取得
+    let sessionInfo = null;
+    try{
+      sessionInfo = await chrome.runtime.sendMessage({type:'GET_DELETED_SESSION'});
+    }catch{}
+
+    // Read history only after the background has completed session initialization.
     const storageData = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, 'deletedBookmarksHistory', 'deletedBookmarksSessionStart']);
     let history = storageData[DELETED_BOOKMARKS_KEY] || storageData['deletedBookmarksHistory'] || [];
-    let sessionStart = storageData['deletedBookmarksSessionStart'] || 0;
-
-    // backgroundからセッション情報を取得（フォールバック）
-    if(!sessionStart){
-      try{
-        const resp = await chrome.runtime.sendMessage({type:'GET_DELETED_SESSION'});
-        if(resp && resp.sessionStart) sessionStart = resp.sessionStart;
-      }catch{}
-    }
+    let sessionStart = sessionInfo?.sessionStart || storageData['deletedBookmarksSessionStart'] || 0;
 
     // セッション開始以降のものだけをフィルタ（起動〜終了までの削除のみ表示）
     if(sessionStart){
@@ -1071,16 +1167,13 @@ async function renderDeletedBookmarks(){
       row.addEventListener('contextmenu', async (e)=>{
         e.preventDefault();
         try{
-          const { [DELETED_BOOKMARKS_KEY]: hist = [] } = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY]);
-          const idx = hist.findIndex(h => h.deletedAt === item.deletedAt && h.id === item.id);
-          if(idx>=0){
-            hist.splice(idx,1);
-            await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: hist});
-            renderDeletedBookmarks();
-          }else{
-            chrome.runtime.sendMessage({type:'DELETE_DELETED_ENTRY', entryId: item.id, deletedAt: item.deletedAt}).catch(()=>{});
-          }
-        }catch{}
+          const response = await chrome.runtime.sendMessage({
+            type:'DELETE_DELETED_ENTRY',
+            entryId: item.id,
+            deletedAt: item.deletedAt
+          });
+          if(!response?.ok) setOperationStatus('deletedBookmarkHistoryUpdateFailed');
+        }catch{ setOperationStatus('deletedBookmarkHistoryUpdateFailed'); }
       });
 
       container.appendChild(row);
@@ -1170,11 +1263,11 @@ document.getElementById('btn-clear-deleted')?.addEventListener('click', async ()
     if (!confirm(i18n('confirmClearDeleted'))) return;
   }
   try {
-    await chrome.runtime.sendMessage({ type: 'CLEAR_DELETED_BOOKMARKS' });
+    const response = await chrome.runtime.sendMessage({ type: 'CLEAR_DELETED_BOOKMARKS' });
+    if(!response?.ok) setOperationStatus('deletedBookmarkHistoryUpdateFailed');
   } catch (e) {
     console.warn('CLEAR_DELETED_BOOKMARKS failed', e);
-    // フォールバック: 直接消す
-    try{ await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: []}); renderDeletedBookmarks(); }catch{}
+    setOperationStatus('deletedBookmarkHistoryUpdateFailed');
   }
 });
 document.getElementById('btn-options')?.addEventListener('click', ()=>chrome.runtime.openOptionsPage());
@@ -1198,64 +1291,6 @@ document.querySelectorAll('.view-tab').forEach(btn=>{
   btn.addEventListener('click', ()=>switchView(btn.dataset.view));
 });
 
-function isConfigNodeForDelete(node){
-  if(!node) return false;
-  return node.title===CONFIG_TITLE && (node.url||'').startsWith(CONFIG_PREFIX);
-}
-function stripConfigForDelete(node){
-  if(!node) return null;
-  if(isConfigNodeForDelete(node)) return null;
-  if(node.children && node.children.length){
-    const filtered=[];
-    for(const ch of node.children){
-      const copy = {...ch, children: ch.children ? [...ch.children] : undefined};
-      const cleaned = stripConfigForDelete(copy);
-      if(cleaned) filtered.push(cleaned);
-    }
-    return {...node, children: filtered};
-  }
-  return {...node};
-}
-async function saveDeletedBookmarkFallback(id, removeInfo){
-  try{
-    const node = removeInfo && removeInfo.node;
-    if(!node) return;
-    if(isConfigNodeForDelete(node)) return;
-    if(['0','1','2','3'].includes(String(id))) return;
-    const cleaned = stripConfigForDelete(JSON.parse(JSON.stringify(node)));
-    if(!cleaned) return;
-    const data = await chrome.storage.local.get([DELETED_BOOKMARKS_KEY, 'deletedBookmarksHistory', 'deletedBookmarksSessionStart']);
-    let history = data[DELETED_BOOKMARKS_KEY] || data['deletedBookmarksHistory'] || [];
-    let sessionStart = data['deletedBookmarksSessionStart'];
-    if(!sessionStart){
-      sessionStart = Date.now();
-      await chrome.storage.local.set({deletedBookmarksSessionStart: sessionStart}).catch(()=>{});
-    }
-    const now = Date.now();
-    if(history.length>0 && history[0].id===String(id) && (now - history[0].deletedAt) < 1000){
-      return;
-    }
-    const entry = {
-      id: String(id),
-      parentId: removeInfo.parentId,
-      index: typeof removeInfo.index==='number' ? removeInfo.index : 0,
-      node: cleaned,
-      deletedAt: now
-    };
-    history.unshift(entry);
-    if(history.length>200) history.length=200;
-    await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: history});
-  }catch(e){ console.warn('[DeletedBookmarks] sidepanel fallback save failed', e); }
-}
-
-chrome.bookmarks.onChanged.addListener(refresh);
-chrome.bookmarks.onCreated.addListener(refresh);
-chrome.bookmarks.onRemoved.addListener((id, removeInfo)=>{
-  saveDeletedBookmarkFallback(id, removeInfo).catch(()=>{});
-  refresh();
-});
-chrome.bookmarks.onMoved.addListener(refresh);
-if (chrome.bookmarks.onChildrenReordered) chrome.bookmarks.onChildrenReordered.addListener(refresh);
 chrome.tabs.onCreated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); });
 chrome.tabs.onUpdated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); });
 chrome.tabs.onRemoved.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); if(currentView==='closed') renderClosedTabs(); });
@@ -1280,9 +1315,9 @@ chrome.storage.onChanged.addListener((changes, area)=>{
     if ((changes[DELETED_BOOKMARKS_KEY] || changes.deletedBookmarksHistory || changes.deletedBookmarksSessionStart) && currentView==='deleted') {
       renderDeletedBookmarks();
     }
-    if (changes[TREE_CACHE_KEY] && currentView==='bookmarks' && !searchQuery){
-      // 他タブでキャッシュ更新されたら差分反映
-      // ただし自分がgetTreeで更新した場合は無視するため、tsチェックは省略
+    if(changes[TREE_CACHE_KEY] && changes[TREE_CACHE_KEY].newValue?.tree && currentView==='bookmarks'){
+      const nextTree = changes[TREE_CACHE_KEY].newValue.tree;
+      if(!lastRenderedTree || !sameBookmarkTree(lastRenderedTree, nextTree)) renderTree(nextTree);
     }
   }
   if(area==='sync'){
@@ -1305,30 +1340,6 @@ chrome.storage.onChanged.addListener((changes, area)=>{
   try{ applyI18n(); }catch{}
   try{ connectToBackground(); }catch{}
   try{ initSearch(); }catch{}
-  // ---- セッション判定: storage.session が空なら新しいブラウザセッション ----
-  try{
-    if(chrome.storage.session){
-      const sess = await chrome.storage.session.get(['sessionActive']).catch(()=>({}));
-      if(!sess.sessionActive){
-        // 新セッション検出 -> 削除履歴をクリア
-        await chrome.storage.session.set({sessionActive: true}).catch(()=>{});
-        try{
-          await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: [], deletedBookmarksSessionStart: Date.now()});
-        }catch{}
-        console.log('[DeletedBookmarks] New browser session detected in sidepanel, cleared');
-      }
-    } else {
-      // storage.session が使えない環境では、日付ベースのフォールバック
-      const {deletedBookmarksSessionStart} = await chrome.storage.local.get(['deletedBookmarksSessionStart']).catch(()=>({}));
-      if(deletedBookmarksSessionStart){
-        const age = Date.now() - deletedBookmarksSessionStart;
-        // 12時間以上経過していたら新セッションとみなす（PCスリープ対策）
-        if(age > 12*60*60*1000){
-          await chrome.storage.local.set({[DELETED_BOOKMARKS_KEY]: [], deletedBookmarksSessionStart: Date.now()}).catch(()=>{});
-        }
-      }
-    }
-  }catch(e){ console.warn('session check in sidepanel failed', e); }
 
   // 設定は裏で読み込みつつ、キャッシュは0msで即表示
   const settingsPromise = loadSettings();
@@ -1384,10 +1395,8 @@ chrome.storage.onChanged.addListener((changes, area)=>{
   try {
     const freshTree = await treePromise;
     if(freshTree){
-      // 差分チェック: 簡易的にJSON長さとtsで比較、違えば再描画
-      const freshStr = JSON.stringify(freshTree);
-      const cachedStr = cachedTree ? JSON.stringify(cachedTree) : '';
-      if (!cachedTree || freshStr.length !== cachedStr.length || freshStr !== cachedStr) {
+      // Avoid allocating full JSON copies just to compare the cache.
+      if (!cachedTree || !sameBookmarkTree(freshTree, cachedTree)) {
         renderTree(freshTree);
       }
       // 最新をキャッシュ
