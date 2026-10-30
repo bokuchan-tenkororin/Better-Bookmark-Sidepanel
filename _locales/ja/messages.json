@@ -225,6 +225,12 @@
   "bookmarkMoveFailed": {
     "message": "ブックマークを移動できませんでした"
   },
+  "folderCreateComplete": {
+    "message": "フォルダを作成しました"
+  },
+  "folderCreateFailed": {
+    "message": "フォルダを作成できませんでした"
+  },
   "deletedBookmarkSaveFailed": {
     "message": "削除したブックマークを履歴に保存できませんでした"
   },

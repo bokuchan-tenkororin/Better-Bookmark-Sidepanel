@@ -226,6 +226,12 @@
   "bookmarkMoveFailed": {
     "message": "Could not move bookmark"
   },
+  "folderCreateComplete": {
+    "message": "Folder created"
+  },
+  "folderCreateFailed": {
+    "message": "Could not create folder"
+  },
   "deletedBookmarkSaveFailed": {
     "message": "Could not save the deleted bookmark to history"
   },

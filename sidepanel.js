@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
   ...SYNC_DEFAULTS,
   expandedFolders: {},
   lastSelectedFolderId: null,
+  lastCreatedFolderId: null,
 };
 
 // ---- Config file bookmark persistence ----
@@ -298,7 +299,7 @@ function applySettingsToCSS() {
 // storage.local優先のloadSettings
 async function loadSettings() {
   try{
-    const localKeys = [...PERSIST_OPTION_KEYS, 'expandedFolders','lastSelectedFolderId','configBackupFolderId'];
+    const localKeys = [...PERSIST_OPTION_KEYS, 'expandedFolders','lastSelectedFolderId','lastCreatedFolderId','configBackupFolderId'];
     const localData = await chrome.storage.local.get(localKeys).catch(()=>({}));
     const hasLocalOpt = PERSIST_OPTION_KEYS.some(k=> localData[k]!==undefined);
     let merged = {...DEFAULT_SETTINGS, ...localData};
@@ -360,7 +361,10 @@ function filterTreeNodes(nodes, query){
     if(n.title===CONFIG_TITLE && n.url?.startsWith(CONFIG_PREFIX)) continue;
     if(!n.url){ // folder
       const filteredChildren = n.children ? filterTreeNodes(n.children, query) : [];
-      if(filteredChildren.length>0 || isNodeMatchingSearch(n, query)){
+      if(isNodeMatchingSearch(n, query)){
+        // フォルダ名が一致した場合は中身もそのまま表示する
+        out.push(n);
+      }else if(filteredChildren.length>0){
         out.push({...n, children: filteredChildren});
       }
     }else{
@@ -399,6 +403,18 @@ function renderTree(tree){
   }
 
   updateBulkDeleteButton();
+}
+
+// ブックマーク一覧の再表示。
+// force=false: 既に取得済みのツリー(lastRenderedTree)から即時再描画（検索入力時などに使用）
+// force=true : 最新のツリーを取得してから再描画（作成・削除・改名・移動後に使用）
+function refresh(force){
+  if(currentView!=='bookmarks') return Promise.resolve();
+  if(!force && lastRenderedTree){
+    try{ renderTree(lastRenderedTree); }catch(e){ console.warn('refresh failed', e); }
+    return Promise.resolve();
+  }
+  return getTree().then(tree=>{ renderTree(tree); }).catch(e=>{ console.warn('refresh failed', e); });
 }
 
 function setOperationStatus(key){
@@ -468,6 +484,7 @@ async function performBookmarkDrop(draggedId, targetId, position){
     }
 
     const moved = await safeBookmarkMove(source.id, {parentId, ...(index === undefined ? {} : {index})});
+    refresh(true);
     setOperationStatus(moved ? 'bookmarkMoveComplete' : 'bookmarkMoveFailed');
     return moved;
   }catch(error){
@@ -714,6 +731,7 @@ async function deleteNodeWithTarget(target){
   try{ await chrome.bookmarks.removeTree(t.id); }catch(e){
     try{ await chrome.bookmarks.remove(t.id); }catch(err){ console.error(err); }
   }
+  refresh(true);
 }
 function showDialog(title, defaultValue, okText){
   return new Promise(resolve=>{
@@ -752,6 +770,7 @@ async function showRenameDialogWithTarget(target){
   const newName = await showDialog(i18n('rename'), t.title, i18n('save'));
   if(newName && newName!==t.title){
     try{ await chrome.bookmarks.update(t.id, {title: newName}); }catch(e){ console.error(e); }
+    refresh(true);
   }
 }
 function openBookmarksInFolder(folderNode){
@@ -767,16 +786,138 @@ function openBookmarksInFolder(folderNode){
   }
   urls.forEach(u=> chrome.tabs.create({url: u}).catch(()=>{}));
 }
+// ノードが「作成先に使えるフォルダ」かどうか（ブックマークや管理下のノードは除外）
+function isUsableFolderNode(node){
+  return !!node && !node.url && node.unmodifiable !== 'managed';
+}
+
+// ノード配下にある、表示順で一番下のフォルダを返す（無ければ null）
+function findBottomMostFolder(node){
+  let bottom = null;
+  const walk = (n)=>{
+    for(const child of (n.children || [])){
+      if(!child.url) bottom = child;
+      if(child.children && child.children.length) walk(child);
+    }
+  };
+  walk(node);
+  return bottom;
+}
+
+function findNodeById(nodes, id){
+  if(id === undefined || id === null) return null;
+  let hit = null;
+  const walk = (list)=>{
+    for(const n of (list || [])){
+      if(String(n.id) === String(id)){ hit = n; return; }
+      if(n.children && n.children.length) walk(n.children);
+      if(hit) return;
+    }
+  };
+  walk(nodes);
+  return hit;
+}
+
+// 新規フォルダの作成先を決める。
+// 1. 現在開いている（展開中の）フォルダがあれば → その中の一番下のフォルダの下
+//    （中にフォルダが無ければ、開いているフォルダ自身の直下）
+// 2. 何も開いていなければ → 「その他のブックマーク」の中の一番下のフォルダの下
+// 3. ただし直前に作ったフォルダが作成先になる場合（連続して作成しているとき）は
+//    入れ子にせず、そのフォルダと同じ階層の末尾に並べる
+async function resolveNewFolderParentId(){
+  let tree = null;
+  try{ tree = (await chrome.bookmarks.getTree())[0] || null; }catch{}
+  let parentId = null;
+
+  if(tree){
+    const isExpanded = (id)=> !!settings.expandedFolders[String(id)];
+
+    // 現在開いているフォルダ（複数開いていれば最後に開いたもの、それが閉じていれば表示順で一番下のもの）
+    let openNode = isExpanded(settings.lastSelectedFolderId)
+      ? findNodeById(tree.children, settings.lastSelectedFolderId)
+      : null;
+    if(!openNode){
+      let bottom = null;
+      const walk = (nodes)=>{
+        for(const n of (nodes || [])){
+          if(!n.url && isExpanded(n.id)) bottom = n;
+          if(n.children && n.children.length) walk(n.children);
+        }
+      };
+      walk(tree.children);
+      openNode = bottom;
+    }
+    if(isUsableFolderNode(openNode)){
+      const inner = findBottomMostFolder(openNode);
+      parentId = String(isUsableFolderNode(inner) ? inner.id : openNode.id);
+    }
+
+    // 何も開いていない → 「その他のブックマーク」→「ブックマークバー」の中の一番下のフォルダ
+    if(!parentId){
+      for(const rootId of ['2', '1']){
+        const rootNode = findNodeById(tree.children, rootId);
+        if(!isUsableFolderNode(rootNode)) continue;
+        const bottom = findBottomMostFolder(rootNode);
+        parentId = String(isUsableFolderNode(bottom) ? bottom.id : rootNode.id);
+        break;
+      }
+    }
+  }
+  if(!parentId) return '2';
+
+  // 連続して作成している場合（作成先が直前に作ったフォルダの場合）は入れ子にせず、
+  // そのフォルダと同じ階層の末尾に並べる
+  const lastCreatedId = settings.lastCreatedFolderId ? String(settings.lastCreatedFolderId) : null;
+  if(lastCreatedId && lastCreatedId === String(parentId)){
+    try{
+      const [bottom] = await chrome.bookmarks.get(lastCreatedId);
+      if(bottom && bottom.parentId && String(bottom.parentId) !== '0') return String(bottom.parentId);
+    }catch{}
+  }
+  return parentId;
+}
+
+// 指定したフォルダから上へたどった祖先フォルダのID一覧を返す（rootは含めない）
+async function collectFolderChain(id){
+  const ids = [];
+  let cur = id;
+  for(let i=0; i<50 && cur; i++){
+    const sid = String(cur);
+    if(sid === '0') break;
+    ids.push(sid);
+    try{
+      const [bm] = await chrome.bookmarks.get(sid);
+      cur = bm?.parentId;
+    }catch{ break; }
+  }
+  return ids;
+}
+
 async function showNewFolderDialog(){
   const name = await showDialog(i18n('createFolderTitle'), '', i18n('create'));
   if(!name) return;
-  let parentId = settings.lastSelectedFolderId || '1';
-  // 親がフォルダか確認
+  const parentId = await resolveNewFolderParentId();
+  let created = null;
   try{
-    const bm = await chrome.bookmarks.get(parentId);
-    if(bm[0]?.url) parentId='1';
-  }catch{ parentId='1'; }
-  try{ await chrome.bookmarks.create({parentId, title: name}); }catch(e){ console.error(e); }
+    created = await chrome.bookmarks.create({parentId, title: name});
+  }catch(e){
+    console.error('create folder failed', e);
+    setOperationStatus('folderCreateFailed');
+    return;
+  }
+  // 作成したフォルダがすぐに見えるよう、祖先フォルダ・作成先・新規フォルダを展開しておく
+  try{
+    const chain = await collectFolderChain(parentId);
+    for(const id of chain) settings.expandedFolders[id] = true;
+    if(created?.id) settings.expandedFolders[created.id] = true;
+    settings.lastCreatedFolderId = created?.id || null;
+    await chrome.storage.local.set({
+      expandedFolders: settings.expandedFolders,
+      lastCreatedFolderId: settings.lastCreatedFolderId
+    });
+  }catch{}
+  await refresh(true);
+  setOperationStatus('folderCreateComplete');
 }
 
 async function handleBulkDelete(){
@@ -790,6 +931,7 @@ async function handleBulkDelete(){
   for(const id of ids){
     try{ await chrome.bookmarks.removeTree(id); }catch{ try{ await chrome.bookmarks.remove(id); }catch{} }
   }
+  refresh(true);
 }
 function switchView(view){
   currentView = view;
@@ -1307,6 +1449,7 @@ chrome.storage.onChanged.addListener((changes, area)=>{
       }
       if(k==='expandedFolders') settings.expandedFolders = changes[k].newValue || {};
       if(k==='lastSelectedFolderId') settings.lastSelectedFolderId = changes[k].newValue || null;
+      if(k==='lastCreatedFolderId') settings.lastCreatedFolderId = changes[k].newValue || null;
     }
     if(needCSS) applySettingsToCSS();
     if (changes.closedTabsHistory && currentView==='closed') {
