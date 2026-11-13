@@ -138,19 +138,65 @@ body {
 .dialog-actions button.primary { background: var(--accent) !important; color:white !important; border-color:var(--accent) !important; }
 #empty { padding:20px; text-align:center; color:var(--text-secondary); font-size:12px; }
 #empty.hidden { display:none; }
+
+/* ---- 複数選択のまとめ処理バー ---- */
+#selection-bar {
+  display:flex; align-items:center; gap:4px; flex-shrink:0;
+  padding:6px 8px; border-top:1px solid var(--border);
+  background:#fafafa !important; filter:none !important;
+  position:sticky; bottom:0; z-index:20;
+}
+#selection-bar.hidden { display:none; }
+#selection-count {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:12px; color:var(--text-secondary);
+}
+#selection-bar .icon-btn { width:28px; height:26px; }
+
+/* ---- フォルダ選択ダイアログ ---- */
+#folder-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,0.3) !important;
+  display:flex; align-items:center; justify-content:center; z-index:2000;
+  filter:none !important; -webkit-filter:none !important;
+}
+#folder-overlay.hidden { display:none; }
+#folder-dialog {
+  background:white !important; border-radius:10px; padding:16px; width:90%; max-width:320px;
+  max-height:80%; display:flex; flex-direction:column;
+  box-shadow:0 8px 24px rgba(0,0,0,0.2); filter:none !important; -webkit-filter:none !important;
+  color:#202124 !important;
+}
+#folder-dialog h3 { margin:0 0 10px; font-size:14px; color:#202124 !important; }
+#folder-list {
+  overflow:auto; flex:1; min-height:60px; max-height:50vh;
+  border:1px solid var(--border); border-radius:6px; padding:4px;
+  background:white !important;
+}
+.folder-option {
+  display:flex; align-items:center; gap:6px; width:100%; text-align:left;
+  border:none; background:transparent; padding:5px 6px; border-radius:4px;
+  cursor:pointer; font-size:13px; color:#202124 !important;
+}
+.folder-option:hover { background:var(--bg-hover); }
+.folder-option .folder-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#folder-empty { padding:12px; text-align:center; color:var(--text-secondary); font-size:12px; }
 #operation-status {
   position:fixed; left:50%; bottom:12px; z-index:2100; transform:translate(-50%, 8px);
   max-width:calc(100% - 24px); padding:7px 12px; border-radius:7px;
   background:#202124; color:#fff; font-size:12px; opacity:0; pointer-events:none;
-  transition:opacity 0.15s, transform 0.15s;
+  transition:opacity 0.15s, transform 0.15s, bottom 0.15s;
 }
+/* 選択バーが出ている間はブックマーク一覧エリア側（選択バーの直上）に表示する */
+#operation-status.above-selection-bar { bottom:52px; }
 #operation-status.visible { opacity:1; transform:translate(-50%, 0); }
 .section-title { font-size:10px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; padding:8px 10px 3px; letter-spacing:0.5px; }
 html.__toggle_color_theme_active,
 html.__toggle_color_theme_active body,
 html.__toggle_color_theme_active #app,
 html.__toggle_color_theme_active #dialog-overlay,
-html.__toggle_color_theme_active #dialog {
+html.__toggle_color_theme_active #dialog,
+html.__toggle_color_theme_active #folder-overlay,
+html.__toggle_color_theme_active #folder-dialog {
   filter: none !important;
   -webkit-filter: none !important;
 }

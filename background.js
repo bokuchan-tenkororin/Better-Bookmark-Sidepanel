@@ -185,6 +185,14 @@ function refreshBookmarkTreeCache(){
     const resolveRefresh = resolveScheduledCacheRefresh;
     scheduledCacheRefresh = null;
     resolveScheduledCacheRefresh = null;
+    if(isSidePanelOpen){
+      // サイドパネル表示中は、変更はパネル自身の bookmarks.* リスナーで即描画される。
+      // 全件ツリーをJSONにして storage.local へ書き出すのは重いので省略する
+      // （パネルが閉じるとき disconnect で必ず書き直す）。
+      cacheReadyPromise = Promise.resolve();
+      resolveRefresh?.();
+      return;
+    }
     cacheReadyPromise = (async()=>{
       try{
         const tree = await chrome.bookmarks.getTree();
@@ -306,7 +314,14 @@ chrome.storage.onChanged.addListener((ch,area)=>{
   if(area==='local' && [...OPTION_KEYS, META_KEY, ...UI_KEYS].some(k=>k in ch)) schedule();
 });
 
-chrome.runtime.onConnect.addListener(port=>{ if(port.name==='sidepanel'){ saveOpen(true); port.onDisconnect.addListener(()=>saveOpen(false)); } });
+chrome.runtime.onConnect.addListener(port=>{ if(port.name==='sidepanel'){
+  saveOpen(true);
+  port.onDisconnect.addListener(()=>{
+    saveOpen(false);
+    // パネル表示中は書き留めておいたブックマークツリーのキャッシュをここで確定させる
+    refreshBookmarkTreeCache().catch(()=>{});
+  });
+} });
 
 chrome.runtime.onMessage.addListener((msg,_,sendResponse)=>{
   if(msg.type==='CLEAR_TODAY_CLOSED'){

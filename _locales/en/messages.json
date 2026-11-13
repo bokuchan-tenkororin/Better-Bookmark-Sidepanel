@@ -254,5 +254,42 @@
         "content": "$1"
       }
     }
+  },
+  "moveUp": {
+    "message": "Move up"
+  },
+  "moveDown": {
+    "message": "Move down"
+  },
+  "moveToFolder": {
+    "message": "Move to folder"
+  },
+  "clearSelection": {
+    "message": "Clear selection"
+  },
+  "selectedCount": {
+    "message": "$1 selected",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "chooseDestinationFolder": {
+    "message": "Choose destination folder"
+  },
+  "noFoldersAvailable": {
+    "message": "No folders available to move into"
+  },
+  "bulkMoveComplete": {
+    "message": "Moved $1 item(s)",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "bulkMoveFailed": {
+    "message": "Could not move"
   }
 }

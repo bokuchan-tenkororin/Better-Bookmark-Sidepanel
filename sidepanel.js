@@ -55,7 +55,9 @@ const ROOT_BOOKMARK_IDS = new Set(['0', '1', '2', '3']);
 const isRootBookmarkId = (id) => ROOT_BOOKMARK_IDS.has(String(id ?? ''));
 const isUnmodifiableNode = (node) => !!node?.unmodifiable || isRootBookmarkId(node?.id);
 
-async function safeBookmarkMove(id, dest){
+// known: { source:移動元ノード(取得済), dstKnownFolder:trueで移動先フォルダ確認済 }
+// →不要な bookmarks.get の往復を省いて高速化する
+async function safeBookmarkMove(id, dest, known){
   try{
     const sid = String(id);
     let dParent = String(dest.parentId ?? '');
@@ -72,30 +74,33 @@ async function safeBookmarkMove(id, dest){
       console.warn('Parent 0 is forbidden, fallback to Other Bookmarks(2)');
       dParent = '2';
       dest = { ...dest, parentId: dParent };
+      known = null; // 移動先が変わったので再確認する
     }
 
     // 移動元がunmodifiable(managed)なら禁止
-    try{
-      const [srcNode] = await chrome.bookmarks.get(sid);
-      if (srcNode?.unmodifiable === 'managed') {
-        console.warn('Blocked managed node:', sid);
-        return false;
-      }
-      // rootフォルダ自体はunmodifiableでなくてもIDで弾く
-      if (isRootBookmarkId(srcNode?.id)) return false;
-    }catch{}
+    let srcNode = known?.source || null;
+    if (!srcNode) {
+      try{ [srcNode] = await chrome.bookmarks.get(sid); }catch{}
+    }
+    if (srcNode?.unmodifiable === 'managed') {
+      console.warn('Blocked managed node:', sid);
+      return false;
+    }
+    // rootフォルダ自体はunmodifiableでなくてもIDで弾く
+    if (isRootBookmarkId(srcNode?.id)) return false;
 
     // 移動先がunmodifiableなフォルダ自体への移動は、子として追加ならOK
     // ただし移動先自体が root(0) の場合は上記で2にフォールバック済み
-    try{
-      const [dstNode] = await chrome.bookmarks.get(dParent);
+    if (!known?.dstKnownFolder) {
+      let dstNode = null;
+      try{ [dstNode] = await chrome.bookmarks.get(dParent); }catch{}
       // dstがブックマーク( urlあり )ならその親に置くべき
       if (dstNode?.url) {
         const p = dstNode.parentId || '2';
         if (String(p) === '0') dest.parentId = '2';
         else dest.parentId = p;
       }
-    }catch{}
+    }
 
     await chrome.bookmarks.move(sid, dest);
     return true;
@@ -122,7 +127,7 @@ function isUserBookmark(node){
 let settings = { ...DEFAULT_SETTINGS };
 let searchQuery = '';
 let contextTarget = null;
-let dragState = { draggedId: null };
+let dragState = { draggedId: null, multi: false };
 let dialogCallback = null;
 let sidePanelPort = null;
 let currentView = 'bookmarks';
@@ -168,7 +173,10 @@ function sameBookmarkTree(a, b){
 }
 
 function initFaviconObserver(){
-  try{ if(faviconObserver) faviconObserver.disconnect(); }catch{}
+  // 毎回 new し直さず、既存の observer を使い回す（生成コストと破棄オーバーヘッドを避ける）
+  try{
+    if(faviconObserver){ faviconObserver.disconnect(); return; }
+  }catch{}
   // root null = viewport, rootMargin大きめで先読み
   faviconObserver = new IntersectionObserver((entries)=>{
     for(const entry of entries){
@@ -236,6 +244,7 @@ function connectToBackground() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'CLOSE_SIDEPANEL') {
     document.getElementById('dialog-overlay')?.classList.add('hidden');
+    document.getElementById('folder-overlay')?.classList.add('hidden');
     document.getElementById('context-menu')?.classList.add('hidden');
     sendResponse({ closed: true });
     setTimeout(() => window.close(), 20);
@@ -379,7 +388,7 @@ function renderTree(tree){
   if(!container) return;
   lastRenderedTree = tree;
   initFaviconObserver();
-  container.innerHTML = '';
+
   let nodes = tree;
   if(Array.isArray(tree) && tree.length===1 && tree[0].children){
     nodes = tree[0].children;
@@ -392,14 +401,26 @@ function renderTree(tree){
     nodes = filterTreeNodes(nodes, searchQuery);
   }
 
+  // フラグメントに作り込んでから一括で差し替え（レイアウトを1回だけ起こす）
+  const fragment = document.createDocumentFragment();
   if(nodes.length===0){
     document.getElementById('empty')?.classList.remove('hidden');
   }else{
     document.getElementById('empty')?.classList.add('hidden');
     for(const node of nodes){
       const el = createTreeNode(node);
-      if(el) container.appendChild(el);
+      if(el) fragment.appendChild(el);
     }
+  }
+
+  const scrollTop = container.scrollTop;
+  container.replaceChildren(fragment);
+  // 再描画後もスクロール位置を維持（検索時は先頭から）
+  if(resetScrollOnRender){
+    resetScrollOnRender = false;
+    container.scrollTop = 0;
+  }else{
+    container.scrollTop = scrollTop;
   }
 
   updateBulkDeleteButton();
@@ -408,19 +429,65 @@ function renderTree(tree){
 // ブックマーク一覧の再表示。
 // force=false: 既に取得済みのツリー(lastRenderedTree)から即時再描画（検索入力時などに使用）
 // force=true : 最新のツリーを取得してから再描画（作成・削除・改名・移動後に使用）
-function refresh(force){
-  if(currentView!=='bookmarks') return Promise.resolve();
-  if(!force && lastRenderedTree){
-    try{ renderTree(lastRenderedTree); }catch(e){ console.warn('refresh failed', e); }
-    return Promise.resolve();
+// 高速化: 同じツリーなら再描画しない / 同時進行の再取得は1回に束ねる
+let renderDirty = false;          // 一覧以外のビュー中に変更が来た → ブックマーク表示に戻るとき再描画
+let refreshInFlight = null;
+let refreshQueued = false;
+let refreshTimer = null;
+let resetScrollOnRender = false;
+let savedTreeScroll = 0;
+
+function renderCurrent(tree){
+  if(currentView === 'bookmarks'){
+    try{ renderTree(tree); renderDirty = false; }
+    catch(e){ console.warn('render failed', e); }
+  }else{
+    // 一覧以外を表示中は DOM を作り直さず、最新の状態だけ保持して次に戻るときに描画する
+    lastRenderedTree = tree;
+    renderDirty = true;
   }
-  return getTree().then(tree=>{ renderTree(tree); }).catch(e=>{ console.warn('refresh failed', e); });
 }
 
-function setOperationStatus(key){
+function refresh(force){
+  if(!force){
+    if(currentView !== 'bookmarks'){ renderDirty = true; return Promise.resolve(); }
+    if(lastRenderedTree){
+      try{ renderTree(lastRenderedTree); renderDirty = false; }catch(e){ console.warn('refresh failed', e); }
+    }
+    return Promise.resolve();
+  }
+  // 同時に複数の更新が来たら1回の取得に束ねる（末尾の1回で取り直す）
+  if(refreshInFlight){
+    refreshQueued = true;
+    return refreshInFlight;
+  }
+  refreshInFlight = getTree().then(tree=>{
+    // 取得結果が表示済みと同一なら再描画しない（DOM構築・favicon再読込を省く）
+    if(lastRenderedTree && sameBookmarkTree(lastRenderedTree, tree)) return;
+    renderCurrent(tree);
+  }).catch(e=>{ console.warn('refresh failed', e); }).finally(()=>{
+    refreshInFlight = null;
+    if(refreshQueued){ refreshQueued = false; refresh(true); }
+  });
+  return refreshInFlight;
+}
+
+// 変更イベント用のデバウンス再取得（自分の操作と外部の変更を1回にまとめる）
+function scheduleRefresh(delay = 50){
+  if(refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(()=>{
+    refreshTimer = null;
+    refresh(true);
+  }, delay);
+}
+
+function setOperationStatus(key, subs){
   const status = document.getElementById('operation-status');
   if(!status) return;
-  status.textContent = i18n(key);
+  // 選択バーと重ならないよう、選択バー表示中は一覧エリア内の直上にずらして表示する
+  const bar = document.getElementById('selection-bar');
+  status.classList.toggle('above-selection-bar', !!bar && !bar.classList.contains('hidden'));
+  status.textContent = (subs !== undefined) ? i18n(key, subs) : i18n(key);
   status.classList.add('visible');
   clearTimeout(operationStatusTimer);
   operationStatusTimer = setTimeout(()=>status.classList.remove('visible'), 2400);
@@ -442,15 +509,21 @@ async function performBookmarkDrop(draggedId, targetId, position){
   if(isRootBookmarkId(draggedId)) return false;
 
   try{
-    const [source] = await chrome.bookmarks.get(String(draggedId));
-    const [target] = await chrome.bookmarks.get(String(targetId));
+    const [sourceArr, targetArr] = await Promise.all([
+      chrome.bookmarks.get(String(draggedId)).catch(()=>null),
+      chrome.bookmarks.get(String(targetId)).catch(()=>null)
+    ]);
+    const source = sourceArr && sourceArr[0];
+    const target = targetArr && targetArr[0];
     if(!source || !target || source.unmodifiable === 'managed'){
       setOperationStatus('bookmarkMoveFailed');
       return false;
     }
 
     let parentId;
-    let index;
+    let moveIndex;          // undefined なら末尾に追加
+    const dstKnownFolder = true;
+
     if(position === 'inside'){
       if(target.url || target.unmodifiable === 'managed'){
         setOperationStatus('bookmarkMoveFailed');
@@ -480,18 +553,250 @@ async function performBookmarkDrop(draggedId, targetId, position){
         setOperationStatus('bookmarkMoveFailed');
         return false;
       }
-      index = targetIndex + (position === 'after' ? 1 : 0);
+      // ★移動「後」の最終位置（ソースを除いた並びでのindex）
+      const finalIndex = targetIndex + (position === 'after' ? 1 : 0);
+
+      // ★Chromeの index は「移動前」の並びを基準にした位置として解釈される。
+      //   chromium: BookmarkModel::Move() が同一親で index > old_index のとき
+      //   「index--」してから挿入する（また index==old / old+1 は無操作）。
+      //   つまり最終位置 F を渡したいときは、old_index より大きい場合だけ +1 する必要がある。
+      //   （この補正がないと「1つ下」が無操作、「nつ下」が「n-1つ下」になる）
+      const sameParent = String(source.parentId || '') === parentId;
+      const oldIndex = typeof source.index === 'number'
+        ? source.index
+        : siblings.findIndex(item=>String(item.id) === String(source.id));
+      moveIndex = (sameParent && oldIndex >= 0 && finalIndex > oldIndex)
+        ? finalIndex + 1
+        : finalIndex;
     }
 
-    const moved = await safeBookmarkMove(source.id, {parentId, ...(index === undefined ? {} : {index})});
-    refresh(true);
-    setOperationStatus(moved ? 'bookmarkMoveComplete' : 'bookmarkMoveFailed');
+    const moved = await safeBookmarkMove(
+      source.id,
+      {parentId, ...(moveIndex === undefined ? {} : {index: moveIndex})},
+      {source, dstKnownFolder}
+    );
+    if(moved){
+      // できればDOMとキャッシュ木をその場で並べ替え、再描画なしで即時表示する
+      if(applyLocalMove(source.id, targetId, position)){
+        scheduleRefresh(60);   // 裏で整合性を確認するだけ（変化がなければ再描画しない）
+      }else{
+        await refresh(true);   // 通常の全体再描画
+      }
+      setOperationStatus('bookmarkMoveComplete');
+    }else{
+      setOperationStatus('bookmarkMoveFailed');
+    }
     return moved;
   }catch(error){
     console.warn('Bookmark drop failed', error);
     setOperationStatus('bookmarkMoveFailed');
     return false;
   }
+}
+
+// ---- チェックした項目をまとめてドラッグ移動する ----
+// ドラッグ元がチェック済みで、チェックが2件以上あるときだけ一括移動になる
+function isBulkDrag(draggedId){
+  if(!dragState.multi || !draggedId) return false;
+  return checkedIds.has(String(draggedId)) && checkedIds.size > 1;
+}
+
+async function performBulkDrop(draggedId, targetId, position){
+  if(!draggedId || !targetId || String(draggedId) === String(targetId)) return false;
+  if(isRootBookmarkId(draggedId)) return false;
+  if(!isBulkDrag(draggedId)) return performBookmarkDrop(draggedId, targetId, position);
+
+  try{
+    const raw = await collectCheckedNodes();
+    const checkedSet = new Set(raw.map(n=>String(n.id)));
+
+    // 移動先がチェックした項目そのもの／その子孫なら入れ子になるので不可
+    if(checkedSet.has(String(targetId)) || await isDescendantOfAny(targetId, checkedSet)){
+      setOperationStatus('bulkMoveFailed');
+      return false;
+    }
+
+    // root・管理ブックマークは移動できない
+    const movable = raw.filter(n=>!isRootBookmarkId(n.id) && n.unmodifiable !== 'managed');
+    // 親もチェック済みの子は親に従って移動する（単独では動かさない）
+    const nodes = await filterNestedNodes(movable);
+    if(nodes.length === 0){
+      setOperationStatus('bulkMoveFailed');
+      return false;
+    }
+
+    let target = null;
+    try{ [target] = await chrome.bookmarks.get(String(targetId)); }catch{}
+    if(!target){
+      setOperationStatus('bulkMoveFailed');
+      return false;
+    }
+
+    let parentId;
+    if(position === 'inside'){
+      if(target.url || target.unmodifiable === 'managed'){
+        setOperationStatus('bulkMoveFailed');
+        return false;
+      }
+      parentId = String(targetId);
+    }else{
+      parentId = String(target.parentId || '');
+      if(!parentId || parentId === '0'){
+        setOperationStatus('bulkMoveFailed');
+        return false;
+      }
+    }
+
+    let moved = 0, failed = 0, skipped = 0;
+
+    if(position === 'inside'){
+      // 末尾へツリー順に追加する（既に移動先にいるものは位置を変えない）
+      let destChildren = new Set();
+      try{
+        const sibs = await chrome.bookmarks.getChildren(parentId);
+        destChildren = new Set(sibs.map(n=>String(n.id)));
+      }catch{}
+      for(const n of nodes){
+        const sid = String(n.id);
+        if(destChildren.has(sid)){ skipped++; continue; }
+        const ok = await safeBookmarkMove(sid, {parentId}, {source: n, dstKnownFolder: true});
+        if(ok) moved++; else failed++;
+      }
+    }else{
+      let arr;
+      try{
+        const sibs = await chrome.bookmarks.getChildren(parentId);
+        arr = sibs.map(n=>String(n.id));
+      }catch{
+        setOperationStatus('bulkMoveFailed');
+        return false;
+      }
+      const tIdx = arr.findIndex(id=>String(id) === String(targetId));
+      if(tIdx < 0){
+        setOperationStatus('bulkMoveFailed');
+        return false;
+      }
+      // ★最終的な並びを先に作り、左から1つずつ正しい位置へ置く方式にする。
+      //   「各ノードをターゲットの直前/直後に毎回挿入」すると、グループの一部が
+      //   既にターゲットを越えている場合に順序が入れ替わってしまうため。
+      const movingIds = nodes.map(n=>String(n.id));
+      const without = arr.filter(id=>!movingIds.includes(id)); // チェック項目を除いた並び
+      const tPos = without.findIndex(id=>String(id) === String(targetId));
+      const insertAt = tPos + (position === 'after' ? 1 : 0);
+      const finalArr = without.slice();
+      finalArr.splice(insertAt, 0, ...movingIds);
+
+      for(let i = 0; i < finalArr.length; i++){
+        if(arr[i] === finalArr[i]) continue;
+        const sid = finalArr[i];
+        const oldIndex = arr.indexOf(sid);        // -1 = 他フォルダから移動
+        const sameParent = oldIndex >= 0;
+        // 配置しようとしている位置は「そのノードを除いた並び」基準。
+        // 同一親で後ろ側へ動く場合のみ Chromium の index-- 補正のため +1 する
+        const apiIndex = (sameParent && i > oldIndex) ? i + 1 : i;
+        let ok = false;
+        try{
+          await chrome.bookmarks.move(sid, {parentId, index: apiIndex});
+          ok = true;
+        }catch(e){
+          console.warn('bulk drag move failed', e);
+        }
+        if(ok){
+          const next = sameParent ? arr.filter(x=>x !== sid) : arr.slice();
+          next.splice(i, 0, sid);
+          arr = next;
+          moved++;
+        }else{
+          failed++;
+        }
+      }
+    }
+
+    if(moved > 0){
+      if(position === 'inside'){
+        // 結果が見えるよう移動先フォルダを展開しておく
+        settings.expandedFolders[String(targetId)] = true;
+        try{
+          await chrome.storage.local.set({expandedFolders: settings.expandedFolders});
+        }catch{}
+      }
+      await refresh(true);
+      setOperationStatus('bulkMoveComplete', String(moved));
+      return true;
+    }
+    if(failed > 0) setOperationStatus('bulkMoveFailed');
+    return false;
+  }catch(error){
+    console.warn('Bulk drop failed', error);
+    setOperationStatus('bulkMoveFailed');
+    return false;
+  }
+}
+
+// ---- 即時反映: 移動結果をDOMとキャッシュ木に直接適用し、再描画を省いて高速化する ----
+function findNodeElement(id){
+  const container = document.getElementById('tree-container');
+  if(!container || id===undefined || id===null) return null;
+  const sid = String(id).replace(/["\\]/g, '\\$&');
+  try{ return container.querySelector('.tree-node[data-id="' + sid + '"]'); }catch{ return null; }
+}
+
+function locateNodeInTree(nodes, id){
+  if(!Array.isArray(nodes)) return null;
+  const sid = String(id);
+  for(let i=0; i<nodes.length; i++){
+    const n = nodes[i];
+    if(String(n.id) === sid) return {node:n, list:nodes, index:i};
+    if(n.children && n.children.length){
+      const hit = locateNodeInTree(n.children, id);
+      if(hit) return hit;
+    }
+  }
+  return null;
+}
+
+// ドロップ直後に再描画せずに並べ替える。true を返したら再描画不要。
+// 失敗した場合は false を返し、呼び出し側の全体再描画にフォールバックする。
+function applyLocalMove(draggedId, targetId, position){
+  if(position !== 'before' && position !== 'after') return false; // inside は通常再描画
+  const tree = lastRenderedTree;
+  if(!tree) return false;
+  const draggedInfo = locateNodeInTree(tree, draggedId);
+  const targetInfo = locateNodeInTree(tree, targetId);
+  if(!draggedInfo || !targetInfo) return false;
+  if(draggedInfo.node === targetInfo.node) return false;
+  if(draggedInfo.list !== targetInfo.list) return false; // 異なるフォルダ間の移動は全体再描画
+
+  // 1) キャッシュ木を並べ替え、同じ親の index を振り直す
+  try{
+    const list = draggedInfo.list;
+    const from = list.indexOf(draggedInfo.node);
+    if(from < 0) return false;
+    list.splice(from, 1);
+    let to = list.findIndex(n=>String(n.id) === String(targetId));
+    if(to < 0) return false;
+    if(position === 'after') to += 1;
+    list.splice(to, 0, draggedInfo.node);
+    for(let i=0; i<list.length; i++) list[i].index = i;
+  }catch(e){
+    lastRenderedTree = null; // 木が壊れたので次回は必ず再描画する
+    return false;
+  }
+
+  // 2) DOM を同じ順に並べ替える（1要素の移動だけなので高速）
+  try{
+    const draggedEl = findNodeElement(draggedId);
+    const targetEl = findNodeElement(targetId);
+    if(!draggedEl || !targetEl) throw new Error('row not found');
+    const parent = targetEl.parentNode;
+    if(!parent || draggedEl.parentNode !== parent) throw new Error('parent mismatch');
+    if(position === 'after') parent.insertBefore(draggedEl, targetEl.nextSibling);
+    else parent.insertBefore(draggedEl, targetEl);
+  }catch(e){
+    lastRenderedTree = null; // DOMだけ食い違ったので再描画で作り直す
+    return false;
+  }
+  return true;
 }
 
 function createTreeNode(node){
@@ -543,7 +848,7 @@ function createTreeNode(node){
   checkbox.type = 'checkbox';
   checkbox.className = 'node-checkbox';
   checkbox.dataset.id = node.id;
-  checkbox.checked = checkedIds.has(node.id);
+  checkbox.checked = checkedIds.has(String(node.id));
   checkbox.addEventListener('click', (e)=>{ e.stopPropagation(); toggleCheck(node.id, checkbox.checked); });
   row.appendChild(checkbox);
 
@@ -606,11 +911,14 @@ function createTreeNode(node){
   row.addEventListener('dragstart', (e)=>{
     if (isUnmodifiableNode(node)) { e.preventDefault(); return; }
     dragState.draggedId = node.id;
+    // ドラッグ元がチェック済みなら、チェックした項目全まとめて移動する
+    dragState.multi = checkedIds.has(String(node.id)) && checkedIds.size > 1;
     e.dataTransfer.setData('text/plain', node.id);
     e.dataTransfer.effectAllowed = 'move';
   });
   row.addEventListener('dragend', ()=>{
     dragState.draggedId = null;
+    dragState.multi = false;
     row.classList.remove('drop-before','drop-after','drop-inside');
   });
   row.addEventListener('dragover', (e)=>{
@@ -648,7 +956,10 @@ function createTreeNode(node){
     const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
     const position = row.dataset.dropPosition;
     delete row.dataset.dropPosition;
-    if(position) await performBookmarkDrop(draggedId, node.id, position);
+    if(position){
+      if(isBulkDrag(draggedId)) await performBulkDrop(draggedId, node.id, position);
+      else await performBookmarkDrop(draggedId, node.id, position);
+    }
   });
 
   wrapper.appendChild(row);
@@ -672,7 +983,8 @@ function createTreeNode(node){
       e.preventDefault();
       e.stopPropagation();
       const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
-      await performBookmarkDrop(draggedId, node.id, 'inside');
+      if(isBulkDrag(draggedId)) await performBulkDrop(draggedId, node.id, 'inside');
+      else await performBookmarkDrop(draggedId, node.id, 'inside');
     });
     wrapper.appendChild(childrenDiv);
   }
@@ -681,21 +993,54 @@ function createTreeNode(node){
 }
 
 function toggleCheck(id, checked){
-  if(checked) checkedIds.add(id);
-  else checkedIds.delete(id);
+  const sid = String(id);
+  if(checked) checkedIds.add(sid);
+  else checkedIds.delete(sid);
   updateBulkDeleteButton();
 }
+function clearSelection(){
+  if(checkedIds.size === 0) return;
+  checkedIds.clear();
+  document.querySelectorAll('.node-checkbox:checked').forEach(cb=>{ cb.checked = false; });
+  updateBulkDeleteButton();
+}
+// 選択肢として使えないID（消えたノード・root）を取り除く
+function pruneCheckedIds(){
+  if(checkedIds.size === 0) return;
+  for(const id of Array.from(checkedIds)){
+    if(isRootBookmarkId(id)) checkedIds.delete(id);
+  }
+  if(!lastRenderedTree || checkedIds.size === 0) return;
+  const live = new Set();
+  const walk = (ns)=>{ for(const n of (ns||[])){ live.add(String(n.id)); if(n.children) walk(n.children); } };
+  walk(lastRenderedTree);
+  for(const id of Array.from(checkedIds)){
+    if(!live.has(id)) checkedIds.delete(id);
+  }
+}
 function updateBulkDeleteButton(){
+  pruneCheckedIds();
   const btn = document.getElementById('btn-bulk-delete');
   const badge = document.getElementById('delete-count');
-  if(!btn) return;
+  const bar = document.getElementById('selection-bar');
   const count = checkedIds.size;
-  if(count>0){
-    btn.disabled = false;
-    if(badge){ badge.textContent = String(count); badge.classList.remove('hidden'); }
-  }else{
-    btn.disabled = false; // 元実装は常に有効だがbadgeで表示
-    if(badge){ badge.classList.add('hidden'); }
+  if(btn){
+    if(badge){
+      if(count>0){
+        badge.textContent = String(count);
+        badge.classList.remove('hidden');
+      }else{
+        badge.classList.add('hidden');
+      }
+    }
+  }
+  if(bar){
+    bar.classList.toggle('hidden', count===0);
+    const label = document.getElementById('selection-count');
+    if(label) label.textContent = count>0 ? i18n('selectedCount', String(count)) : '';
+    // 表示中のステータス表示も選択バーに被らない位置へ追従させる
+    const status = document.getElementById('operation-status');
+    if(status) status.classList.toggle('above-selection-bar', count>0);
   }
 }
 function showContextMenu(x,y){
@@ -933,7 +1278,286 @@ async function handleBulkDelete(){
   }
   refresh(true);
 }
+
+// ===================== 複数選択のまとめ処理 =====================
+
+// チェック中のノードを「表示順（ツリー順）」で取得する。
+// ツリーに無いID（取り消し済み等）は Chrome から取り直す。
+async function collectCheckedNodes(){
+  const out = [];
+  if(checkedIds.size===0) return out;
+  const seen = new Set();
+  const walk = (nodes)=>{
+    for(const n of (nodes||[])){
+      const sid = String(n.id);
+      if(checkedIds.has(sid)){ out.push(n); seen.add(sid); }
+      if(n.children) walk(n.children);
+    }
+  };
+  if(lastRenderedTree) walk(lastRenderedTree);
+  const missing = Array.from(checkedIds).filter(id=>!seen.has(id));
+  if(missing.length){
+    const got = await Promise.all(missing.map(id=>
+      chrome.bookmarks.get(id).then(a=>a&&a[0]).catch(()=>null)
+    ));
+    for(const g of got) if(g) out.push(g);
+  }
+  return out;
+}
+
+function groupCheckedByParent(nodes){
+  const groups = new Map();
+  for(const n of nodes){
+    const pid = String(n.parentId || '');
+    if(!pid || pid==='0') continue; // root 直下は並べ替え不可
+    if(!groups.has(pid)) groups.set(pid, []);
+    groups.get(pid).push(n);
+  }
+  return groups;
+}
+
+// 同一親内で from → to へ1つ移動する。arr は実配列の写し（結果を追従させる）
+async function moveSiblingIndex(id, parentId, arr, from, to){
+  if(from===to) return true;
+  // Chrome の index は「移動前」の並び基準。下方向(to>from)は +1 補正が要る
+  // （Chromium BookmarkModel::Move() が index > old_index のとき index-- するため）
+  const apiIndex = to > from ? to + 1 : to;
+  try{
+    await chrome.bookmarks.move(id, {parentId, index: apiIndex});
+  }catch(e){
+    console.warn('shift move failed', e);
+    return false;
+  }
+  arr.splice(from, 1);
+  arr.splice(to, 0, id);
+  return true;
+}
+
+// direction < 0: 上へ / direction > 0: 下へ
+// 選択項目は互いの位置を越えない（先頭・末尾で止まる）ように1つずつずらす
+async function shiftSiblings(parentId, nodes, direction){
+  let siblings;
+  try{ siblings = await chrome.bookmarks.getChildren(parentId); }catch{ return 0; }
+  const arr = siblings.map(n=>String(n.id));
+  const picked = new Set(nodes.map(n=>String(n.id)));
+  let moved = 0;
+  if(direction < 0){
+    for(let i=1; i<arr.length; i++){
+      if(!picked.has(arr[i]) || picked.has(arr[i-1])) continue;
+      const ok = await moveSiblingIndex(arr[i], parentId, arr, i, i-1);
+      if(!ok) break;
+      moved++;
+    }
+  }else{
+    for(let i=arr.length-2; i>=0; i--){
+      if(!picked.has(arr[i]) || picked.has(arr[i+1])) continue;
+      const ok = await moveSiblingIndex(arr[i], parentId, arr, i, i+1);
+      if(!ok) break;
+      moved++;
+    }
+  }
+  return moved;
+}
+
+async function handleBulkShift(direction){
+  if(checkedIds.size===0) return;
+  const nodes = await collectCheckedNodes();
+  const groups = groupCheckedByParent(nodes);
+  let moved = 0;
+  for(const [parentId, list] of groups){
+    moved += await shiftSiblings(parentId, list, direction);
+  }
+  if(moved>0){
+    await refresh(true);
+    setOperationStatus('bulkMoveComplete', String(moved));
+  }else{
+    setOperationStatus('bulkMoveFailed');
+  }
+}
+
+// id が idSet のいずれかの子孫（または自身）なら true
+async function isDescendantOfAny(id, idSet){
+  let cur = id;
+  for(let i=0; i<64 && cur; i++){
+    const sid = String(cur);
+    if(idSet.has(sid)) return true;
+    if(sid==='0') break;
+    try{
+      const [n] = await chrome.bookmarks.get(sid);
+      cur = n?.parentId;
+    }catch{ break; }
+  }
+  return false;
+}
+
+function collectDescendantIds(node, out){
+  out.add(String(node.id));
+  for(const c of (node.children||[])) collectDescendantIds(c, out);
+}
+
+// 親（＝別のチェック項目）の子孫であるノードを取り除く。
+// 親も一緒に移動するので、子は親に従って移動する（単独で動かすと親から引き剥がされる）
+async function filterNestedNodes(nodes){
+  const ids = new Set(nodes.map(n=>String(n.id)));
+  const parentMap = new Map();   // id → 親ノード
+  if(lastRenderedTree){
+    const walk = (list, parent)=>{
+      for(const n of (list||[])){
+        parentMap.set(String(n.id), parent);
+        if(n.children) walk(n.children, n);
+      }
+    };
+    walk(lastRenderedTree, null);
+  }
+  const out = [];
+  for(const n of nodes){
+    const sid = String(n.id);
+    let nested = false;
+    if(parentMap.has(sid)){
+      let cur = parentMap.get(sid);
+      let steps = 0;
+      while(cur && steps++ < 64){
+        if(ids.has(String(cur.id))){ nested = true; break; }
+        const cid = String(cur.id);
+        cur = parentMap.has(cid) ? parentMap.get(cid) : null;
+      }
+    }else{
+      // 描画済みツリーに無いノードは API で先祖をたどる
+      const others = new Set(Array.from(ids).filter(id=>id !== sid));
+      if(others.size) nested = await isDescendantOfAny(sid, others);
+    }
+    if(!nested) out.push(n);
+  }
+  return out;
+}
+
+// チェックした項目を dest フォルダへ移動する。移動件数を返す（-1 = 移動先不正）
+async function moveCheckedToFolder(destId){
+  const dest = String(destId || '');
+  if(!dest || dest==='0') return -1;
+  const nodes = await collectCheckedNodes();
+  if(nodes.length===0) return -1;
+
+  // 移動先がチェックしたフォルダ自身／その子孫なら入れ子になるので不可
+  const checkedFolders = new Set(nodes.filter(n=>!n.url).map(n=>String(n.id)));
+  if(checkedFolders.has(dest)) return -1;
+  if(await isDescendantOfAny(dest, checkedFolders)) return -1;
+
+  // root・管理ブックマークは移動できない。親もチェック済みの子は親に従う
+  const movable = await filterNestedNodes(
+    nodes.filter(n=>!isRootBookmarkId(n.id) && n.unmodifiable !== 'managed')
+  );
+  if(movable.length===0) return -1;
+
+  let destNode = null;
+  try{ [destNode] = await chrome.bookmarks.get(dest); }catch{}
+  if(!destNode || destNode.url || destNode.unmodifiable==='managed') return -1;
+
+  let moved = 0;
+  let alreadyThere = 0;
+  let failed = 0;
+  for(const n of movable){
+    const sid = String(n.id);
+    if(sid===dest) continue;
+    if(String(n.parentId||'')===dest){ alreadyThere++; continue; } // 既に移動先なら位置を変えない
+    const ok = await safeBookmarkMove(sid, {parentId: dest}, {source: n, dstKnownFolder: true});
+    if(ok) moved++; else failed++;
+  }
+  // 何も移動できず、既存の移動先揃いでもなければ失敗扱い
+  if(moved===0 && failed>0) return -1;
+  if(moved===0 && alreadyThere===0) return -1;
+
+  if(moved>0){
+    // 結果が見えるよう移動先を展開しておく
+    try{
+      const chain = await collectFolderChain(dest);
+      for(const id of chain) settings.expandedFolders[id] = true;
+      settings.expandedFolders[dest] = true;
+      settings.lastSelectedFolderId = dest;
+      await chrome.storage.local.set({
+        expandedFolders: settings.expandedFolders,
+        lastSelectedFolderId: settings.lastSelectedFolderId
+      });
+    }catch{}
+    await refresh(true);
+  }
+  return moved;
+}
+
+function hideFolderPicker(){
+  document.getElementById('folder-overlay')?.classList.add('hidden');
+}
+
+async function showFolderPicker(){
+  const overlay = document.getElementById('folder-overlay');
+  const listEl = document.getElementById('folder-list');
+  if(!overlay || !listEl) return;
+
+  const nodes = await collectCheckedNodes();
+  if(nodes.length===0) return;
+
+  // 移動先にできないフォルダ：チェックしたフォルダ自身とその子孫
+  const forbidden = new Set(nodes.filter(n=>!n.url).map(n=>String(n.id)));
+  if(lastRenderedTree){
+    for(const fid of Array.from(forbidden)){
+      const hit = locateNodeInTree(lastRenderedTree, fid);
+      if(hit) collectDescendantIds(hit.node, forbidden);
+    }
+  }
+
+  let tree = lastRenderedTree;
+  if(!tree){
+    try{ tree = await chrome.bookmarks.getTree(); }catch{ tree = null; }
+  }
+
+  const options = [];
+  const walk = (list, depth)=>{
+    for(const n of (list||[])){
+      if(n.url) continue;
+      const id = String(n.id);
+      if(id==='0'){ walk(n.children, depth); continue; } // root 自体は移動先にしない
+      if(n.unmodifiable==='managed') continue;
+      if(!forbidden.has(id)) options.push({id, title: n.title || id, depth});
+      walk(n.children, depth + 1);
+    }
+  };
+  walk(tree, 0);
+
+  listEl.textContent = '';
+  if(options.length===0){
+    const empty = document.createElement('div');
+    empty.id = 'folder-empty';
+    empty.textContent = i18n('noFoldersAvailable');
+    listEl.appendChild(empty);
+  }
+  for(const opt of options){
+    const btn = document.createElement('button');
+    btn.className = 'folder-option';
+    btn.dataset.id = opt.id;
+    btn.style.paddingLeft = (6 + opt.depth * 14) + 'px';
+    const ico = document.createElement('span');
+    ico.textContent = '📁';
+    const name = document.createElement('span');
+    name.className = 'folder-name';
+    name.textContent = opt.title;
+    name.title = opt.title;
+    btn.append(ico, name);
+    btn.addEventListener('click', async ()=>{
+      hideFolderPicker();
+      const moved = await moveCheckedToFolder(opt.id);
+      if(moved>=0) setOperationStatus('bulkMoveComplete', String(moved));
+      else setOperationStatus('bulkMoveFailed');
+    });
+    listEl.appendChild(btn);
+  }
+  overlay.classList.remove('hidden');
+}
 function switchView(view){
+  const prevView = currentView;
+  if(prevView==='bookmarks' && view!=='bookmarks'){
+    const c = document.getElementById('tree-container');
+    if(c) savedTreeScroll = c.scrollTop;
+  }
   currentView = view;
   document.querySelectorAll('.view-tab').forEach(btn=>{
     btn.classList.toggle('active', btn.dataset.view===view);
@@ -955,6 +1579,15 @@ function switchView(view){
   if(view==='tabs') renderOpenTabs();
   if(view==='closed') renderClosedTabs();
   if(view==='deleted') renderDeletedBookmarks();
+  if(view==='bookmarks'){
+    // 一覧以外の表示中にブックマークが変更された場合は戻ったとき再描画する
+    if(renderDirty && lastRenderedTree){
+      try{ renderTree(lastRenderedTree); }catch(e){ console.warn('render failed', e); }
+      renderDirty = false;
+    }
+    const c = document.getElementById('tree-container');
+    if(c) c.scrollTop = savedTreeScroll;
+  }
 }
 async function renderOpenTabs(){
   const container = document.getElementById('tabs-container');
@@ -1337,6 +1970,7 @@ function initSearch(){
 
   const doSearch = ()=>{
     searchQuery = input.value.trim();
+    resetScrollOnRender = true; // 検索結果は先頭から表示する
     refresh();
   };
   
@@ -1369,6 +2003,7 @@ function initSearch(){
       wrapper.classList.add('hidden');
       input.value='';
       searchQuery='';
+      resetScrollOnRender = true;
       document.getElementById('btn-search').style.display='flex';
       refresh();
     }
@@ -1414,6 +2049,15 @@ document.getElementById('btn-clear-deleted')?.addEventListener('click', async ()
 });
 document.getElementById('btn-options')?.addEventListener('click', ()=>chrome.runtime.openOptionsPage());
 document.getElementById('btn-bulk-delete')?.addEventListener('click', handleBulkDelete);
+document.getElementById('sel-move-up')?.addEventListener('click', ()=>handleBulkShift(-1));
+document.getElementById('sel-move-down')?.addEventListener('click', ()=>handleBulkShift(1));
+document.getElementById('sel-move-folder')?.addEventListener('click', showFolderPicker);
+document.getElementById('sel-delete')?.addEventListener('click', handleBulkDelete);
+document.getElementById('sel-clear')?.addEventListener('click', clearSelection);
+document.getElementById('folder-cancel')?.addEventListener('click', hideFolderPicker);
+document.getElementById('folder-overlay')?.addEventListener('click', (e)=>{
+  if(e.target && e.target.id==='folder-overlay') hideFolderPicker();
+});
 document.getElementById('ctx-delete')?.addEventListener('click', ()=>{ const t=contextTarget; hideContextMenu(true); deleteNodeWithTarget(t); });
 document.getElementById('ctx-openAll')?.addEventListener('click', async ()=>{
   const target=contextTarget; hideContextMenu(true); if(!target) return;
@@ -1427,7 +2071,7 @@ document.getElementById('ctx-rename')?.addEventListener('click', ()=>{ const t=c
 document.addEventListener('click', e=>{
   if(!e.target.closest('#context-menu')){ const m=document.getElementById('context-menu'); if(m && !m.classList.contains('hidden')) hideContextMenu(false); }
 });
-document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ hideContextMenu(true); if(dialogCallback) dialogCallback(); } });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ hideContextMenu(true); hideFolderPicker(); if(dialogCallback) dialogCallback(); } });
 
 document.querySelectorAll('.view-tab').forEach(btn=>{
   btn.addEventListener('click', ()=>switchView(btn.dataset.view));
@@ -1437,6 +2081,23 @@ chrome.tabs.onCreated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(
 chrome.tabs.onUpdated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); });
 chrome.tabs.onRemoved.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); if(currentView==='closed') renderClosedTabs(); });
 chrome.tabs.onActivated.addListener(()=>{ if(currentView==='tabs') renderOpenTabs(); });
+
+// ブックマークの変更をサイドパネル自身が直接受け取る。
+// （backgroundの storage キャッシュ書き出しを待たないので更新が速い）
+const onBookmarkChanged = (id, changeInfo)=>{
+  // 設定バックアップ用ブックマークの書き換えは表示に影響しないので無視する
+  // （フォルダ展開のたびに設定を保存するため、これは頻繁に発生する）
+  if(changeInfo && changeInfo.title === CONFIG_TITLE && String(changeInfo.url || '').startsWith(CONFIG_PREFIX)) return;
+  scheduleRefresh();
+};
+[
+  chrome.bookmarks.onCreated,
+  chrome.bookmarks.onChanged,
+  chrome.bookmarks.onRemoved,
+  chrome.bookmarks.onMoved,
+  chrome.bookmarks.onChildrenReordered,
+  chrome.bookmarks.onImportEnd
+].forEach(ev=>{ try{ ev?.addListener(onBookmarkChanged); }catch(e){ console.warn('bookmark listener failed', e); } });
 
 chrome.storage.onChanged.addListener((changes, area)=>{
   // local優先
@@ -1539,13 +2200,14 @@ chrome.storage.onChanged.addListener((changes, area)=>{
     const freshTree = await treePromise;
     if(freshTree){
       // Avoid allocating full JSON copies just to compare the cache.
-      if (!cachedTree || !sameBookmarkTree(freshTree, cachedTree)) {
+      const cacheMatches = !!cachedTree && sameBookmarkTree(freshTree, cachedTree);
+      if (!cacheMatches) {
         renderTree(freshTree);
+        // キャッシュが古くなっているときだけ全件ツリーを書き出す（重い処理）
+        try{
+          await chrome.storage.local.set({[TREE_CACHE_KEY]: {tree: freshTree, ts: Date.now()}});
+        }catch{}
       }
-      // 最新をキャッシュ
-      try{
-        await chrome.storage.local.set({[TREE_CACHE_KEY]: {tree: freshTree, ts: Date.now()}});
-      }catch{}
     }
   } catch(e) {
     console.error('initial render failed', e);

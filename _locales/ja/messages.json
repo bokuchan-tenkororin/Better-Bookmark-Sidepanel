@@ -253,5 +253,42 @@
         "content": "$1"
       }
     }
+  },
+  "moveUp": {
+    "message": "上へ移動"
+  },
+  "moveDown": {
+    "message": "下へ移動"
+  },
+  "moveToFolder": {
+    "message": "フォルダへ移動"
+  },
+  "clearSelection": {
+    "message": "選択を解除"
+  },
+  "selectedCount": {
+    "message": "$1件選択中",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "chooseDestinationFolder": {
+    "message": "移動先のフォルダを選択"
+  },
+  "noFoldersAvailable": {
+    "message": "移動先に使えるフォルダがありません"
+  },
+  "bulkMoveComplete": {
+    "message": "$1件を移動しました",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "bulkMoveFailed": {
+    "message": "移動できませんでした"
   }
 }

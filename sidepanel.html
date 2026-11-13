@@ -32,6 +32,14 @@
   <div id="view-bookmarks" class="view-panel">
     <div id="tree-container"></div>
     <div id="empty" class="hidden"><span data-i18n="noBookmarks"></span></div>
+    <div id="selection-bar" class="hidden">
+      <span id="selection-count"></span>
+      <button id="sel-move-up" class="icon-btn" data-i18n-title="moveUp" title="Move up"><span class="ico">↑</span></button>
+      <button id="sel-move-down" class="icon-btn" data-i18n-title="moveDown" title="Move down"><span class="ico">↓</span></button>
+      <button id="sel-move-folder" class="icon-btn" data-i18n-title="moveToFolder" title="Move to folder"><span class="ico">📁</span></button>
+      <button id="sel-delete" class="icon-btn danger" data-i18n-title="delete" title="Delete"><span class="ico">🗑️</span></button>
+      <button id="sel-clear" class="icon-btn" data-i18n-title="clearSelection" title="Clear selection"><span class="ico">✕</span></button>
+    </div>
   </div>
   <div id="view-tabs-list" class="view-panel hidden"><div id="tabs-container"></div></div>
   <div id="view-closed" class="view-panel hidden"><div id="closed-container"></div></div>
@@ -53,6 +61,16 @@
     <div class="dialog-actions">
       <button id="dialog-cancel" data-i18n="cancel">キャンセル</button>
       <button id="dialog-ok" class="primary" data-i18n="save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="folder-overlay" class="hidden">
+  <div id="folder-dialog">
+    <h3 id="folder-dialog-title" data-i18n="chooseDestinationFolder">Choose destination folder</h3>
+    <div id="folder-list"></div>
+    <div class="dialog-actions">
+      <button id="folder-cancel" data-i18n="cancel">Cancel</button>
     </div>
   </div>
 </div>
