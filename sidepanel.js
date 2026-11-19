@@ -415,6 +415,9 @@ function renderTree(tree){
 
   const scrollTop = container.scrollTop;
   container.replaceChildren(fragment);
+  // 再描画で行の要素が入れ替わるので、隙間ドロップ用の行キャッシュと印を無効化する
+  invalidateGapRows();
+  clearGapIndicator();
   // 再描画後もスクロール位置を維持（検索時は先頭から）
   if(resetScrollOnRender){
     resetScrollOnRender = false;
@@ -504,6 +507,50 @@ function populateFolderChildren(childrenDiv, children){
   childrenDiv.dataset.populated = 'true';
 }
 
+// ---- ルート(0)直下へのドロップの読み替え ----
+// Chrome はルート直下への追加/移動を禁止している（"Can't modify the root bookmark folders."）。
+// 一方 UI ではルートの並びが [ブックマークバー, その他のブックマーク, モバイルのブックマーク] で
+// 決まっているため、「その他のブックマークの末尾」の直下は「モバイルのブックマーク」の行になり、
+// そこにドロップすると必ず失敗していた。
+//   'before' → 直前のルート子フォルダの末尾へ追加
+//   'after'  → 次のルート子フォルダの先頭へ挿入
+// 前も後の兄弟が無ければその位置は作れない（null を返す）。
+async function resolveRootSiblingDestination(targetId, position, movingIds){
+  if(position !== 'before' && position !== 'after') return null;
+  let roots;
+  try{ roots = await chrome.bookmarks.getChildren('0'); }catch{ return null; }
+  const ids = roots.map(n=>String(n.id));
+  const i = ids.indexOf(String(targetId));
+  if(i < 0) return null;
+  let destId, at;
+  if(position === 'before'){
+    if(i === 0) return null;
+    destId = ids[i-1]; at = 'end';
+  }else{
+    if(i === ids.length - 1) return null;
+    destId = ids[i+1]; at = 'start';
+  }
+  let kids;
+  try{ kids = await chrome.bookmarks.getChildren(destId); }catch{ return null; }
+  // 末尾追加は「移動するノードを除いた並び」の長さだけが正しい index
+  // （Chromium は index == children.size() を末尾追加として受け入れる）
+  const index = (at === 'start') ? 0 : kids.filter(k=>!movingIds.has(String(k.id))).length;
+  return { parentId: destId, index };
+}
+
+// 上の同期版。dragover でインジケータを出し、drop で失敗する状態を無くすため。
+function canResolveRootSibling(targetId, position){
+  if(position !== 'before' && position !== 'after') return true;
+  const t = lastRenderedTree;
+  const roots = (Array.isArray(t) && t.length === 1 && Array.isArray(t[0]?.children)) ? t[0].children
+    : (Array.isArray(t) ? t : null);
+  if(!roots || roots.length === 0) return true; // 判定材料が無ければ drop 側の判断に任せる
+  const ids = roots.map(n=>String(n.id));
+  const i = ids.indexOf(String(targetId));
+  if(i < 0) return true;
+  return position === 'before' ? (i > 0) : (i < ids.length - 1);
+}
+
 async function performBookmarkDrop(draggedId, targetId, position){
   if(!draggedId || !targetId || String(draggedId) === String(targetId)) return false;
   if(isRootBookmarkId(draggedId)) return false;
@@ -543,31 +590,41 @@ async function performBookmarkDrop(draggedId, targetId, position){
     }else{
       parentId = String(target.parentId || '');
       if(!parentId || parentId === '0'){
-        setOperationStatus('bookmarkMoveFailed');
-        return false;
-      }
-      const siblings = await chrome.bookmarks.getChildren(parentId);
-      const remaining = siblings.filter(item=>String(item.id) !== String(source.id));
-      const targetIndex = remaining.findIndex(item=>String(item.id) === String(target.id));
-      if(targetIndex < 0){
-        setOperationStatus('bookmarkMoveFailed');
-        return false;
-      }
-      // ★移動「後」の最終位置（ソースを除いた並びでのindex）
-      const finalIndex = targetIndex + (position === 'after' ? 1 : 0);
+        // ルート(0)直下への移動は Chrome が禁止。
+        // 「その他のブックマークの末尾」の次に並ぶ「モバイルのブックマーク」等へ
+        // ドロップしたときがこれに当たる → 前後のルート子フォルダへ読み替える。
+        const resolved = await resolveRootSiblingDestination(
+          target.id, position, new Set([String(source.id)]));
+        if(!resolved){
+          setOperationStatus('bookmarkMoveFailed');
+          return false;
+        }
+        parentId = resolved.parentId;
+        moveIndex = resolved.index;
+      }else{
+        const siblings = await chrome.bookmarks.getChildren(parentId);
+        const remaining = siblings.filter(item=>String(item.id) !== String(source.id));
+        const targetIndex = remaining.findIndex(item=>String(item.id) === String(target.id));
+        if(targetIndex < 0){
+          setOperationStatus('bookmarkMoveFailed');
+          return false;
+        }
+        // ★移動「後」の最終位置（ソースを除いた並びでのindex）
+        const finalIndex = targetIndex + (position === 'after' ? 1 : 0);
 
-      // ★Chromeの index は「移動前」の並びを基準にした位置として解釈される。
-      //   chromium: BookmarkModel::Move() が同一親で index > old_index のとき
-      //   「index--」してから挿入する（また index==old / old+1 は無操作）。
-      //   つまり最終位置 F を渡したいときは、old_index より大きい場合だけ +1 する必要がある。
-      //   （この補正がないと「1つ下」が無操作、「nつ下」が「n-1つ下」になる）
-      const sameParent = String(source.parentId || '') === parentId;
-      const oldIndex = typeof source.index === 'number'
-        ? source.index
-        : siblings.findIndex(item=>String(item.id) === String(source.id));
-      moveIndex = (sameParent && oldIndex >= 0 && finalIndex > oldIndex)
-        ? finalIndex + 1
-        : finalIndex;
+        // ★Chromeの index は「移動前」の並びを基準にした位置として解釈される。
+        //   chromium: BookmarkModel::Move() が同一親で index > old_index のとき
+        //   「index--」してから挿入する（また index==old / old+1 は無操作）。
+        //   つまり最終位置 F を渡したいときは、old_index より大きい場合だけ +1 する必要がある。
+        //   （この補正がないと「1つ下」が無操作、「nつ下」が「n-1つ下」になる）
+        const sameParent = String(source.parentId || '') === parentId;
+        const oldIndex = typeof source.index === 'number'
+          ? source.index
+          : siblings.findIndex(item=>String(item.id) === String(source.id));
+        moveIndex = (sameParent && oldIndex >= 0 && finalIndex > oldIndex)
+          ? finalIndex + 1
+          : finalIndex;
+      }
     }
 
     const moved = await safeBookmarkMove(
@@ -633,6 +690,7 @@ async function performBulkDrop(draggedId, targetId, position){
     }
 
     let parentId;
+    let rootInsert = null;   // 'start'|'end' : ルート直下を隣接フォルダへ読み替えたときの挿入端
     if(position === 'inside'){
       if(target.url || target.unmodifiable === 'managed'){
         setOperationStatus('bulkMoveFailed');
@@ -642,8 +700,15 @@ async function performBulkDrop(draggedId, targetId, position){
     }else{
       parentId = String(target.parentId || '');
       if(!parentId || parentId === '0'){
-        setOperationStatus('bulkMoveFailed');
-        return false;
+        // ルート(0)直下へは移動できない → 前後のルート子フォルダへ読み替える
+        const resolved = await resolveRootSiblingDestination(
+          target.id, position, new Set(nodes.map(n=>String(n.id))));
+        if(!resolved){
+          setOperationStatus('bulkMoveFailed');
+          return false;
+        }
+        parentId = resolved.parentId;
+        rootInsert = resolved.index === 0 ? 'start' : 'end';
       }
     }
 
@@ -672,17 +737,24 @@ async function performBulkDrop(draggedId, targetId, position){
         return false;
       }
       const tIdx = arr.findIndex(id=>String(id) === String(targetId));
-      if(tIdx < 0){
-        setOperationStatus('bulkMoveFailed');
-        return false;
-      }
       // ★最終的な並びを先に作り、左から1つずつ正しい位置へ置く方式にする。
       //   「各ノードをターゲットの直前/直後に毎回挿入」すると、グループの一部が
       //   既にターゲットを越えている場合に順序が入れ替わってしまうため。
       const movingIds = nodes.map(n=>String(n.id));
       const without = arr.filter(id=>!movingIds.includes(id)); // チェック項目を除いた並び
-      const tPos = without.findIndex(id=>String(id) === String(targetId));
-      const insertAt = tPos + (position === 'after' ? 1 : 0);
+      let insertAt;
+      if(rootInsert){
+        // ルート直下の読み替え先（隣接フォルダ）にはターゲットが居ないので
+        // 先頭/末尾へ並べる
+        insertAt = rootInsert === 'start' ? 0 : without.length;
+      }else{
+        const tPos = without.findIndex(id=>String(id) === String(targetId));
+        if(tIdx < 0 || tPos < 0){
+          setOperationStatus('bulkMoveFailed');
+          return false;
+        }
+        insertAt = tPos + (position === 'after' ? 1 : 0);
+      }
       const finalArr = without.slice();
       finalArr.splice(insertAt, 0, ...movingIds);
 
@@ -797,6 +869,86 @@ function applyLocalMove(draggedId, targetId, position){
     return false;
   }
   return true;
+}
+
+// ---- 行と行の隙間(マージン・余白)でもドロップできるようにする ----
+// 行の dragover が拾わない1px の隙間は従来ドロップ出来ず（黙って無視され）、
+// 特に「その他のブックマークの末尾」と「モバイルのブックマーク」の間は
+// 常に失敗していた。カーソル位置から最寄りの行を決めて行と同じ処理を行う。
+let gapIndicatorRow = null;
+let gapRowCache = null;
+
+function invalidateGapRows(){ gapRowCache = null; }
+
+function clearGapIndicator(){
+  if(!gapIndicatorRow) return;
+  gapIndicatorRow.classList.remove('drop-before','drop-after','drop-inside');
+  delete gapIndicatorRow.dataset.dropPosition;
+  gapIndicatorRow = null;
+}
+
+// 行の dragover と同じ式で位置を判定する
+function dropPositionAt(row, y){
+  const rect = row.getBoundingClientRect();
+  const ratio = (y - rect.top) / Math.max(rect.height, 1);
+  if(row.classList.contains('folder') && ratio >= 0.3 && ratio <= 0.7) return 'inside';
+  return ratio > 0.7 ? 'after' : 'before';
+}
+
+// カーソル位置に最も近い行と、そこに置いたときの位置を返す
+function resolveGapTarget(y){
+  const container = document.getElementById('tree-container');
+  if(!container) return null;
+  if(!gapRowCache) gapRowCache = Array.from(container.querySelectorAll('.node-row'));
+  let above = null;
+  for(const r of gapRowCache){
+    const rect = r.getBoundingClientRect();
+    if(rect.height <= 0) continue;                             // 折りたたみ中
+    if(y < rect.top) return { row: r, position: 'before' };    // 下側に最初に出た行の直前
+    if(y <= rect.bottom) return { row: r, position: dropPositionAt(r, y) }; // 行の横マージン等
+    above = r;                                                 // 上側に最も近い行
+  }
+  return above ? { row: above, position: 'after' } : null;     // 一覧の下端
+}
+
+// 隙間の dragover / drop（.tree-node と #tree-container で共用）
+function handleGapDragover(e){
+  // 行自身が対象のときは行の判定に任せる（行が拒否した場合も同じ扱いにする）
+  if(e.target && e.target.closest && e.target.closest('.node-row')) return;
+  const draggedId = dragState.draggedId || e.dataTransfer.getData('text/plain');
+  const gap = (draggedId && !isRootBookmarkId(draggedId)) ? resolveGapTarget(e.clientY) : null;
+  const targetId = gap ? (gap.row.closest('.tree-node')?.dataset.id || '') : '';
+  if(!gap || !targetId || String(targetId) === String(draggedId)
+    || !canResolveRootSibling(targetId, gap.position)){
+    clearGapIndicator();
+    e.dataTransfer.dropEffect = 'none';
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  if(gapIndicatorRow !== gap.row){ clearGapIndicator(); gapIndicatorRow = gap.row; }
+  gap.row.classList.toggle('drop-before', gap.position === 'before');
+  gap.row.classList.toggle('drop-after', gap.position === 'after');
+  gap.row.classList.toggle('drop-inside', gap.position === 'inside');
+  gap.row.dataset.dropPosition = gap.position;
+  e.dataTransfer.dropEffect = 'move';
+}
+
+async function handleGapDrop(e){
+  if(e.target && e.target.closest && e.target.closest('.node-row')) return;
+  e.preventDefault();
+  const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
+  if(!draggedId || isRootBookmarkId(draggedId)) return;
+  const gap = resolveGapTarget(e.clientY);
+  if(!gap) return;
+  const targetId = gap.row.closest('.tree-node')?.dataset.id || '';
+  if(!targetId || String(targetId) === String(draggedId)) return;
+  // dragover で弾いた位置は drop でも弾く（インジケータと挙動を一致させる）
+  if(!canResolveRootSibling(targetId, gap.position)) return;
+  e.stopPropagation();
+  clearGapIndicator();
+  if(isBulkDrag(draggedId)) await performBulkDrop(draggedId, targetId, gap.position);
+  else await performBookmarkDrop(draggedId, targetId, gap.position);
 }
 
 function createTreeNode(node){
@@ -922,22 +1074,28 @@ function createTreeNode(node){
     row.classList.remove('drop-before','drop-after','drop-inside');
   });
   row.addEventListener('dragover', (e)=>{
+    // 隙間で付けていたインジケータは行の判定に引き継ぐ（同じ行でも付け直す）
+    clearGapIndicator();
     const draggedId = dragState.draggedId || e.dataTransfer.getData('text/plain');
     if (!draggedId || isRootBookmarkId(draggedId) || String(draggedId) === String(node.id)) {
       e.dataTransfer.dropEffect = 'none';
       return;
     }
-    if(!isFolder && String(node.parentId || '') === '0'){
-      e.dataTransfer.dropEffect = 'none';
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
     const rect = row.getBoundingClientRect();
     const ratio = (e.clientY - rect.top) / Math.max(rect.height, 1);
     let position = 'before';
     if(isFolder && ratio >= 0.3 && ratio <= 0.7) position = 'inside';
     else if(ratio > 0.7) position = 'after';
+    // ルート(0)直下に「その位置」が作れないなら、インジケータを出さずに拒否する。
+    // （インジケータを出しながら drop で失敗する状態を無くすため）
+    if(!canResolveRootSibling(node.id, position)){
+      row.classList.remove('drop-before','drop-after','drop-inside');
+      delete row.dataset.dropPosition;
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
     row.classList.toggle('drop-before', position === 'before');
     row.classList.toggle('drop-after', position === 'after');
     row.classList.toggle('drop-inside', position === 'inside');
@@ -952,6 +1110,7 @@ function createTreeNode(node){
   row.addEventListener('drop', async (e)=>{
     e.preventDefault();
     e.stopPropagation();
+    clearGapIndicator();
     row.classList.remove('drop-before','drop-after','drop-inside');
     const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
     const position = row.dataset.dropPosition;
@@ -964,6 +1123,10 @@ function createTreeNode(node){
 
   wrapper.appendChild(row);
 
+  // 行と行の隙間(行のマージン等)でもドロップできるようにする
+  wrapper.addEventListener('dragover', handleGapDragover);
+  wrapper.addEventListener('drop', handleGapDrop);
+
   if(isFolder){
     const childrenDiv = document.createElement('div');
     childrenDiv.className = 'children' + (settings.expandedFolders[node.id] ? '' : ' collapsed');
@@ -973,6 +1136,8 @@ function createTreeNode(node){
       populateFolderChildren(childrenDiv, node.children);
     }
     childrenDiv.addEventListener('dragover', (e)=>{
+      // 隙間で付けていたインジケータはここで消す（ここでは行の判定を使わない）
+      clearGapIndicator();
       const draggedId = dragState.draggedId || e.dataTransfer.getData('text/plain');
       if(!draggedId || isRootBookmarkId(draggedId) || String(draggedId) === String(node.id)) return;
       e.preventDefault();
@@ -982,6 +1147,7 @@ function createTreeNode(node){
     childrenDiv.addEventListener('drop', async (e)=>{
       e.preventDefault();
       e.stopPropagation();
+      clearGapIndicator();
       const draggedId = e.dataTransfer.getData('text/plain') || dragState.draggedId;
       if(isBulkDrag(draggedId)) await performBulkDrop(draggedId, node.id, 'inside');
       else await performBookmarkDrop(draggedId, node.id, 'inside');
@@ -2024,6 +2190,17 @@ function initSearch(){
 }
 
 // ---- Event Listeners ----
+// 行と行の隙間(行マージン・コンテナの余白)でもドロップを受け付ける。
+// ここは従来 dragover が無く、ドロップしても黙って無視されていた。
+const treeContainer = document.getElementById('tree-container');
+if(treeContainer){
+  treeContainer.addEventListener('dragover', handleGapDragover);
+  treeContainer.addEventListener('drop', handleGapDrop);
+  treeContainer.addEventListener('dragend', ()=>{ clearGapIndicator(); invalidateGapRows(); });
+  treeContainer.addEventListener('dragleave', (e)=>{
+    if(!e.relatedTarget || !treeContainer.contains(e.relatedTarget)) clearGapIndicator();
+  });
+}
 document.getElementById('btn-new-folder')?.addEventListener('click', showNewFolderDialog);
 document.getElementById('btn-clear-closed')?.addEventListener('click', async ()=>{
   if (settings.confirmDelete) {
